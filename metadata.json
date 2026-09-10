@@ -1,0 +1,6 @@
+{
+  "name": "Gettysburg 1863: Arcade FPS",
+  "description": "Arcade-style 3D run-and-gun First Person Shooter set in the Battle of Gettysburg with Union vs Confederate infantry campaign and real-time multiplayer PvP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
