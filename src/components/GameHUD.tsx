@@ -83,6 +83,10 @@ interface GameHUDProps {
   onInteract?: () => void;
   onTouchMove?: (x: number, y: number) => void;
   onTouchLook?: (dx: number, dy: number) => void;
+  /** Reenactment presentation: no crosshair, no arcade HUD — sights and the world do the talking. */
+  reenactment?: boolean;
+  rankUpFlash?: { name: string; key: number } | null;
+  onRankUpFlashSeen?: () => void;
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
@@ -132,6 +136,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onInteract,
   onTouchMove,
   onTouchLook,
+  reenactment = true,
+  rankUpFlash,
+  onRankUpFlashSeen,
 }) => {
   const currentWeapon = HISTORICAL_WEAPONS[weaponKey] || HISTORICAL_WEAPONS['springfield_1861'];
   const currentClassDef = CHARACTER_CLASSES.find((c) => c.id === charClass) || CHARACTER_CLASSES[0];
@@ -140,6 +147,12 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
   // Active hit marker display state
   const [activeHitMarker, setActiveHitMarker] = useState<{ isHeadshot: boolean; damage: number } | null>(null);
+
+  useEffect(() => {
+    if (!rankUpFlash) return;
+    const t = setTimeout(() => onRankUpFlashSeen?.(), 5000);
+    return () => clearTimeout(t);
+  }, [rankUpFlash]);
 
   useEffect(() => {
     if (hitMarker && hitMarker.timestamp) {
@@ -217,6 +230,35 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       onTouchCancel={handleTouchEnd}
       className="absolute inset-0 pointer-events-none z-20 flex flex-col justify-between p-2 sm:p-5 select-none font-sans"
     >
+      {/* Cinematic grade: vignette + warm tone + animated film grain */}
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{ background: 'radial-gradient(ellipse at center, transparent 52%, rgba(8,5,2,0.42) 100%)' }}
+      />
+      <div
+        className="absolute inset-0 pointer-events-none mix-blend-overlay opacity-[0.16]"
+        style={{ background: 'linear-gradient(180deg, rgba(255,196,120,0.5) 0%, transparent 40%, rgba(20,40,80,0.55) 100%)' }}
+      />
+      <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-[0.05] mix-blend-overlay" aria-hidden>
+        <filter id="reenact-grain">
+          <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" />
+        </filter>
+        <rect width="100%" height="100%" filter="url(#reenact-grain)" />
+      </svg>
+      {/* Field dispatch: promotion notice */}
+      {rankUpFlash && (
+        <div
+          key={rankUpFlash.key}
+          className="absolute top-16 left-1/2 -translate-x-1/2 pointer-events-none z-40 animate-[fadein_0.6s_ease-out]"
+        >
+          <div className="bg-[#f4ecd8]/95 border-2 border-[#3d2b1f] rounded-sm px-6 py-3 shadow-[0_4px_24px_rgba(0,0,0,0.6)] text-center"
+            style={{ fontFamily: 'serif' }}>
+            <div className="text-[10px] tracking-[0.3em] uppercase text-[#3d2b1f]/70">Field Promotion</div>
+            <div className="text-xl font-bold text-[#0a0806] tracking-wide">{rankUpFlash.name}</div>
+            <div className="text-[11px] italic text-[#3d2b1f]/80">The drill comes quicker to seasoned hands.</div>
+          </div>
+        </div>
+      )}
       {/* Low Health Blood Vignette */}
       {isLowHealth && (
         <div className="absolute inset-0 bg-red-950/35 border-4 sm:border-8 border-red-800/50 animate-pulse pointer-events-none" />
@@ -236,9 +278,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       )}
 
-      {/* Standard Crosshair for non-scoped ADS */}
-      {/* Standard Crosshair or Cannon Gunner Sighting Reticle */}
-      {!isAimingADS && !cannonState?.isMounted && (
+      {/* Hip crosshair — removed in reenactment mode; iron sights and glass only */}
+      {!reenactment && !isAimingADS && !cannonState?.isMounted && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="relative flex items-center justify-center">
             <div className="w-1.5 h-1.5 bg-amber-400/90 rounded-full shadow" />
@@ -328,8 +369,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       )}
 
-      {/* Visual Hit Marker System */}
-      {activeHitMarker && (
+      {/* Visual Hit Marker System (arcade only) */}
+      {!reenactment && activeHitMarker && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30">
           <div
             className={`relative flex items-center justify-center transition-all duration-75 ${
@@ -393,7 +434,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {/* TOP BAR: Header, Wave, Score, Killfeed */}
       <header id="hud-top-bar" className="flex flex-wrap items-start justify-between w-full gap-2">
-        {/* Top Left: Wave & Faction / Class Info & Dynamic Objective Tracker */}
+        {/* Top Left: Wave & Faction / Class Info & Dynamic Objective Tracker (arcade only) */}
+        {!reenactment && (
         <div className="flex flex-col gap-1.5 bg-[#0a0806]/90 backdrop-blur-md border border-[#3d2b1f] rounded-lg p-2 sm:p-2.5 shadow-2xl max-w-sm">
           <div className="flex items-center gap-2 sm:gap-3">
             <button
@@ -513,8 +555,25 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             )}
           </div>
         </div>
+        )}
+        {reenactment && (
+        <div className="flex items-center gap-2 pointer-events-auto">
+          <button
+            id="btn-hud-pause"
+            onClick={onPause}
+            className="p-1.5 bg-black/40 hover:bg-black/60 rounded text-stone-300/80 transition-all cursor-pointer"
+            title="Pause Game"
+          >
+            <Pause className="w-4 h-4" />
+          </button>
+          <span className="text-[10px] font-serif italic text-stone-200/70 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]">
+            {campaignMission?.title || 'Gettysburg — July 1863'}
+          </span>
+        </div>
+        )}
 
         {/* Top Center: Arcade Score & Combo Meter */}
+        {!reenactment && (
         <div className="bg-[#0a0806]/95 border border-[#d4af37]/70 rounded-lg px-3 sm:px-5 py-1.5 sm:py-2 shadow-2xl flex items-center gap-2 sm:gap-3">
           <Award className="w-4 h-4 sm:w-5 sm:h-5 text-[#d4af37]" />
           <div>
@@ -529,17 +588,19 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             </div>
           )}
         </div>
+        )}
 
-        {/* Top Right: Minimap & Killfeed */}
+        {/* Top Right: Minimap & Killfeed (arcade only) */}
+        {!reenactment && (
         <div className="flex flex-col items-end gap-2 pointer-events-none">
           {minimapEntities && minimapEntities.length > 0 && (
             <div className="pointer-events-auto">
               <Minimap
                 playerPos={{
-                  x: minimapEntities.find((e) => e.type === 'PLAYER')?.x || 0,
-                  z: minimapEntities.find((e) => e.type === 'PLAYER')?.z || 0,
+                  x: minimapEntities.find((e) => e.type === 'player')?.x || 0,
+                  z: minimapEntities.find((e) => e.type === 'player')?.z || 0,
                 }}
-                playerYaw={minimapEntities.find((e) => e.type === 'PLAYER')?.yaw || 0}
+                playerYaw={minimapEntities.find((e) => e.type === 'player')?.yaw || 0}
                 entities={minimapEntities}
                 flagPoints={flagWaypoints}
                 playerFaction={faction}
@@ -569,9 +630,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             ))}
           </div>
         </div>
+        )}
       </header>
 
-      {/* Floating Score Popups */}
+      {/* Floating Score Popups (arcade only) */}
+      {!reenactment && (
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         {scorePopups.map((popup) => (
           <div
@@ -589,6 +652,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
         ))}
       </div>
+      )}
 
       {/* Mobile Touch Floating Action Buttons */}
       {isTouchDevice && (
@@ -632,7 +696,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       )}
 
-      {/* BOTTOM BAR: Health, Class Ability, Artillery, Weapon Status */}
+      {/* BOTTOM BAR: Health, Class Ability, Artillery, Weapon Status (arcade only) */}
+      {!reenactment && (
       <footer id="hud-bottom-bar" className="flex flex-wrap items-end justify-between w-full gap-2">
         {/* Bottom Left: Health Bar, Stamina & Canteen */}
         <div className="flex flex-col gap-1.5 bg-[#0a0806]/90 backdrop-blur-md border border-[#3d2b1f] rounded-lg p-2.5 shadow-2xl min-w-[180px] sm:min-w-[220px]">
@@ -778,6 +843,28 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           )}
         </div>
       </footer>
+      )}
+      {reenactment && (
+      <footer id="hud-reenactment-status" className="absolute bottom-5 left-1/2 -translate-x-1/2 pointer-events-none">
+        {/* Minimal powder-charge indicator: filled = loaded, hollow = empty, pulsing = at the drill */}
+        <div className="flex items-center gap-2" title={isReloading ? 'Loading…' : currentAmmo > 0 ? 'Piece loaded' : 'Piece empty'}>
+          <div
+            className={`w-2.5 h-2.5 rounded-full border ${
+              isReloading
+                ? 'border-stone-300/80 bg-transparent animate-ping'
+                : currentAmmo > 0
+                ? 'border-stone-200/70 bg-stone-200/70 shadow-[0_0_6px_rgba(255,255,255,0.5)]'
+                : 'border-stone-400/40 bg-transparent'
+            }`}
+          />
+          {isReloading && (
+            <div className="w-16 h-[2px] bg-black/40 rounded overflow-hidden">
+              <div className="h-full bg-stone-200/70" style={{ width: `${Math.round(reloadProgress * 100)}%` }} />
+            </div>
+          )}
+        </div>
+      </footer>
+      )}
     </div>
   );
 };

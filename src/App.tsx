@@ -14,7 +14,7 @@ import {
   TicketState,
 } from './types/game';
 import { CAMPAIGN_MISSIONS } from './game/campaignData';
-import { GettysburgEngine } from './game/threeEngine';
+import { GettysburgEngine, VETERAN_RANKS } from './game/threeEngine';
 import { MultiplayerService } from './services/multiplayerService';
 import { TitleScreen } from './components/TitleScreen';
 import { GameHUD } from './components/GameHUD';
@@ -42,6 +42,8 @@ export default function App() {
   const [cannonState, setCannonState] = useState<{ isMounted: boolean; reloadProgress: number }>({ isMounted: false, reloadProgress: 1 });
   const [ticketState, setTicketState] = useState<TicketState>({ unionTickets: 500, confedTickets: 500 });
   const [minimapEntities, setMinimapEntities] = useState<MinimapEntity[]>([]);
+  const [veteranRank, setVeteranRank] = useState<{ index: number; name: string; xp: number }>({ index: 0, name: 'Private', xp: 0 });
+  const [rankUpFlash, setRankUpFlash] = useState<{ name: string; key: number } | null>(null);
   const [flagWaypoints, setFlagWaypoints] = useState<FlagWaypoint[]>([]);
 
   // Historical Accuracy Settings
@@ -242,6 +244,10 @@ export default function App() {
             setScore(s);
             setCombo(c);
           },
+          onRankChange: (index, name, xp) => {
+            setVeteranRank({ index, name, xp });
+            setRankUpFlash({ name, key: Date.now() });
+          },
           onKill: (kfItem) => {
             addKillFeedItem(kfItem);
             setKills((k) => k + 1);
@@ -312,6 +318,11 @@ export default function App() {
 
       engineRef.current = engine;
       setWeaponKey(engine.currentWeaponKey);
+      setVeteranRank({
+        index: engine.veteranRank,
+        name: VETERAN_RANKS[engine.veteranRank].name,
+        xp: engine.veteranXP,
+      });
 
       const checkLock = () => {
         setIsLocked(document.pointerLockElement === gameContainerRef.current);
@@ -505,6 +516,8 @@ export default function App() {
             }}
             onTouchMove={(dx, dy) => engineRef.current?.handleTouchMove(dx, dy)}
             onTouchLook={(dx, dy) => engineRef.current?.handleTouchLook(dx, dy)}
+            rankUpFlash={rankUpFlash}
+            onRankUpFlashSeen={() => setRankUpFlash(null)}
           />
 
           {/* In-Game Pause Menu */}
@@ -513,6 +526,7 @@ export default function App() {
               onResume={handleResume}
               onRestart={handleRestart}
               onQuitToTitle={handleQuitToTitle}
+              veteranRank={veteranRank}
               crtScanlines={historicalSettings.crtScanlines}
               onToggleCrt={() => setHistoricalSettings({ ...historicalSettings, crtScanlines: !historicalSettings.crtScanlines })}
             />

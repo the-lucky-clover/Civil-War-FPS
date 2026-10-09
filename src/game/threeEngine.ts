@@ -20,6 +20,7 @@ export interface GameEngineCallbacks {
   onHealthChange: (health: number, maxHealth: number) => void;
   onAmmoChange: (current: number, reserve: number, isReloading: boolean, reloadProgress: number) => void;
   onScoreChange: (score: number, combo: number) => void;
+  onRankChange?: (rankIndex: number, rankName: string, xp: number) => void;
   onKill: (killItem: KillFeedItem) => void;
   onWaveComplete: (wave: number, totalWaves: number, speedBonus?: number) => void;
   onMissionWon: (stats: any) => void;
@@ -34,12 +35,26 @@ export interface GameEngineCallbacks {
   onHitEnemy?: (isHeadshot: boolean, damage: number) => void;
   onAtmosphereChange?: (timeOfDay: string, weather: WeatherType) => void;
   onLastStandChange?: (isActive: boolean, timeLeft: number) => void;
-  onInteractivePrompt?: (prompt: { type: 'CANNON' | 'DOOR' | 'NONE'; text: string }) => void;
+  onInteractivePrompt?: (prompt: { action: string; key: string; distance: number } | null) => void;
   onCannonStateChange?: (mounted: boolean, reloadProgress: number) => void;
   onTicketChange?: (union: number, confed: number) => void;
   onMinimapUpdate?: (entities: MinimapEntity[], flags: FlagWaypoint[]) => void;
   onOfficerOrder?: (order: OfficerOrder) => void;
 }
+
+export const VETERAN_RANKS: { name: string; xp: number }[] = [
+  { name: 'Private', xp: 0 },
+  { name: 'Corporal', xp: 300 },
+  { name: 'Sergeant', xp: 800 },
+  { name: 'First Sergeant', xp: 1500 },
+  { name: 'Sergeant Major', xp: 2500 },
+  { name: 'Second Lieutenant', xp: 3800 },
+  { name: 'First Lieutenant', xp: 5400 },
+  { name: 'Captain', xp: 7500 },
+  { name: 'Major', xp: 10000 },
+  { name: 'Colonel', xp: 13000 },
+];
+const VETERAN_SAVE_KEY = 'gettysburg-veteran-v1';
 
 export class GettysburgEngine {
   private container: HTMLElement;
@@ -50,6 +65,8 @@ export class GettysburgEngine {
   // Lights
   private hemiLight!: THREE.HemisphereLight;
   private dirLight!: THREE.DirectionalLight;
+  private skyDome!: THREE.Mesh;
+  private skyDomeMat!: THREE.ShaderMaterial;
 
   // Viewmodels & Arms
   private gunPivot: THREE.Group;
@@ -111,6 +128,45 @@ export class GettysburgEngine {
   public kills: number = 0;
   public headshots: number = 0;
   public bayonetKills: number = 0;
+  public veteranXP: number = 0;
+  public veteranRank: number = 0;
+
+  /** Load persisted veteran progress (local to this browser). */
+  public loadVeteranProgress(): void {
+    try {
+      const raw = localStorage.getItem(VETERAN_SAVE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw) as { xp?: number };
+      this.veteranXP = Math.max(0, data.xp || 0);
+      this.veteranRank = this.rankIndexForXP(this.veteranXP);
+    } catch { /* corrupted save — start fresh as a green private */ }
+  }
+
+  private rankIndexForXP(xp: number): number {
+    let idx = 0;
+    for (let i = 0; i < VETERAN_RANKS.length; i++) {
+      if (xp >= VETERAN_RANKS[i].xp) idx = i;
+    }
+    return idx;
+  }
+
+  /** Drill speed of a veteran: green privates fumble, old hands load 3 rounds a minute. */
+  public veteranReloadScale(): number {
+    return 1 - this.veteranRank * 0.03;
+  }
+
+  private awardVeteranXP(amount: number): void {
+    const before = this.veteranRank;
+    this.veteranXP += amount;
+    this.veteranRank = this.rankIndexForXP(this.veteranXP);
+    try {
+      localStorage.setItem(VETERAN_SAVE_KEY, JSON.stringify({ xp: this.veteranXP }));
+    } catch { /* storage unavailable — rank still applies this session */ }
+    if (this.veteranRank > before) {
+      audio.playStreakFanfare(5);
+      this.callbacks.onRankChange?.(this.veteranRank, VETERAN_RANKS[this.veteranRank].name, this.veteranXP);
+    }
+  }
   public artilleryCharge: number = 0; // 0 - 100
 
   // Class Ability State
@@ -269,6 +325,7 @@ export class GettysburgEngine {
     this.isCampaign = isCampaign;
     this.historicalSettings = historicalSettings;
     this.callbacks = callbacks;
+    this.loadVeteranProgress();
 
     // Apply class parameters
     const classDef = CHARACTER_CLASSES.find((c) => c.id === charClass) || CHARACTER_CLASSES[0];
@@ -479,6 +536,47 @@ export class GettysburgEngine {
     this.scene.background = this.currentSkyColor;
     this.scene.fog = new THREE.FogExp2(fogHex, fogDens);
 
+    // Gradient sky dome with sun disc — replaces the flat background color
+    this.skyDomeMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: false,
+      uniforms: {
+        topColor: { value: new THREE.Color(skyHex) },
+        horizonColor: { value: new THREE.Color(fogHex) },
+        sunDirection: { value: new THREE.Vector3(50, 80, -40).normalize() },
+        sunColor: { value: new THREE.Color(lightColor) },
+      },
+      vertexShader: `
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 topColor;
+        uniform vec3 horizonColor;
+        uniform vec3 sunDirection;
+        uniform vec3 sunColor;
+        varying vec3 vWorldPos;
+        void main() {
+          vec3 dir = normalize(vWorldPos - cameraPosition);
+          float h = clamp(dir.y, 0.0, 1.0);
+          vec3 col = mix(horizonColor, topColor, pow(h, 0.55));
+          float sunAmt = max(dot(dir, normalize(sunDirection)), 0.0);
+          col += sunColor * (pow(sunAmt, 900.0) * 1.4 + pow(sunAmt, 10.0) * 0.22);
+          col = mix(col, horizonColor * 0.94, smoothstep(0.0, -0.15, dir.y));
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+    });
+    this.skyDome = new THREE.Mesh(new THREE.SphereGeometry(1400, 24, 16), this.skyDomeMat);
+    this.skyDome.frustumCulled = false;
+    this.skyDome.renderOrder = -10;
+    this.scene.add(this.skyDome);
+
     this.hemiLight = new THREE.HemisphereLight(skyHex, 0x3d352a, 0.75);
     this.scene.add(this.hemiLight);
 
@@ -535,8 +633,10 @@ export class GettysburgEngine {
     groundGeo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 3));
     groundGeo.computeVertexNormals();
 
+    const groundDetail = this.makeGroundDetailTexture();
     const groundMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
+      map: groundDetail,
       roughness: 0.95,
       metalness: 0.0,
     });
@@ -548,6 +648,44 @@ export class GettysburgEngine {
     this.buildGettysburgScenery();
     this.setupWeatherSystem();
     this.applyTimeOfDayForWave(1);
+  }
+
+  /** Procedural close-range ground detail: near-white noise so it multiplies cleanly over vertex colors. */
+  private makeGroundDetailTexture(): THREE.CanvasTexture {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const img = ctx.createImageData(size, size);
+    const hash = (x: number, y: number) => {
+      const v = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+      return v - Math.floor(v);
+    };
+    const smooth = (t: number) => t * t * (3 - 2 * t);
+    const valueNoise = (x: number, y: number) => {
+      const xi = Math.floor(x), yi = Math.floor(y);
+      const xf = x - xi, yf = y - yi;
+      const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+      const u = smooth(xf), v = smooth(yf);
+      return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+    };
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        // Two octaves of blotch + fine grain speckle
+        const n = valueNoise(x / 24, y / 24) * 0.6 + valueNoise(x / 6, y / 6) * 0.4;
+        const speckle = hash(x * 3.1, y * 2.7);
+        let v = 244 - n * 34 - (speckle > 0.93 ? 26 : 0);
+        v = Math.max(150, Math.min(250, v));
+        const i = (y * size + x) * 4;
+        img.data[i] = v; img.data[i + 1] = v - 2; img.data[i + 2] = v - 6; img.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(48, 48);
+    tex.anisotropy = 4;
+    return tex;
   }
 
   private setupWeatherSystem() {
@@ -781,6 +919,16 @@ export class GettysburgEngine {
     const lerpFactor = dt * 1.4;
     this.currentSkyColor.lerp(this.targetSkyColor, lerpFactor);
     this.scene.background = this.currentSkyColor;
+    if (this.skyDomeMat) {
+      (this.skyDomeMat.uniforms.topColor.value as THREE.Color).copy(this.currentSkyColor);
+      (this.skyDomeMat.uniforms.horizonColor.value as THREE.Color).copy(this.currentFogColor);
+      (this.skyDomeMat.uniforms.sunColor.value as THREE.Color).copy(this.currentSunColor);
+      (this.skyDomeMat.uniforms.sunDirection.value as THREE.Vector3)
+        .copy(this.dirLight.position).normalize();
+    }
+    if (this.skyDome && this.camera) {
+      this.skyDome.position.copy(this.camera.position);
+    }
 
     this.currentFogColor.lerp(this.targetFogColor, lerpFactor);
     this.currentFogDensity += (this.targetFogDensity - this.currentFogDensity) * lerpFactor;
@@ -935,6 +1083,7 @@ export class GettysburgEngine {
 
     // 5. Forests — instanced organic stands (see createForests)
     this.createForests();
+    this.createUndergrowth();
 
     // 6. Interactive Artillery Cannons
     this.createArtilleryCannon(-15, this.getTerrainHeight(-15, -10), -10, 0, 'cannon_north_1');
@@ -1087,6 +1236,125 @@ export class GettysburgEngine {
     grass.instanceMatrix.needsUpdate = true;
     if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
     this.scene.add(grass);
+  }
+
+  /**
+   * Hedgerows, shrubbery, and underbrush — Gettysburg's fence-line vegetation.
+   * Hedgerows get collision (real obstacles); shrubs/underbrush are soft cover you can push through.
+   */
+  private createUndergrowth() {
+    const dummy = new THREE.Object3D();
+    const col = new THREE.Color();
+    const hash = (x: number, z: number) => {
+      const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+      return s - Math.floor(s);
+    };
+
+    // Organic bush geometry — jittered icosahedron reads as foliage, not a ball
+    const bushGeo = new THREE.IcosahedronGeometry(1, 1);
+    const bp = bushGeo.attributes.position;
+    for (let i = 0; i < bp.count; i++) {
+      const j = 0.82 + hash(i * 3.7, i * 9.1) * 0.36;
+      bp.setXYZ(i, bp.getX(i) * j, bp.getY(i) * j * 0.75, bp.getZ(i) * j);
+    }
+    bushGeo.computeVertexNormals();
+    const bushMat = new THREE.MeshStandardMaterial({ roughness: 0.92, flatShading: true });
+
+    // --- Hedgerow runs: [x1,z1,x2,z2] field-boundary lines ---
+    const hedgeRuns: [number, number, number, number][] = [
+      [-16, 37, 20, 40],     // Wheatfield north edge
+      [-10, -42, -10, 18],   // Emmitsburg Road east side
+      [-42, 67, -14, 70],    // Peach Orchard south edge
+      [8, -78, 34, -72],     // Farm lane south of McPherson Ridge
+      [44, 30, 52, 58],      // Lane up toward Little Round Top
+    ];
+    const hedgeSpots: { x: number; z: number; s: number }[] = [];
+    for (const [x1, z1, x2, z2] of hedgeRuns) {
+      const len = Math.hypot(x2 - x1, z2 - z1);
+      const n = Math.floor(len / 1.6);
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        const x = x1 + (x2 - x1) * t + (hash(i * 7.3, x1) - 0.5) * 1.4;
+        const z = z1 + (z2 - z1) * t + (hash(i * 3.9, z1) - 0.5) * 1.4;
+        if (Math.abs(x) > 168 || Math.abs(z) > 168) continue;
+        hedgeSpots.push({ x, z, s: 0.9 + Math.random() * 0.7 });
+      }
+    }
+    const hedges = new THREE.InstancedMesh(bushGeo, bushMat, hedgeSpots.length);
+    hedges.castShadow = true;
+    hedgeSpots.forEach((h, i) => {
+      dummy.position.set(h.x, this.getTerrainHeight(h.x, h.z) + 0.55 * h.s, h.z);
+      dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+      dummy.scale.set(h.s * 1.25, h.s * 0.85, h.s * 1.25);
+      dummy.updateMatrix();
+      hedges.setMatrixAt(i, dummy.matrix);
+      col.setHSL(0.24 + Math.random() * 0.05, 0.4 + Math.random() * 0.2, 0.2 + Math.random() * 0.09);
+      hedges.setColorAt(i, col);
+      this.treeColliders.push({ x: h.x, z: h.z, r: 0.75 * h.s });
+    });
+    hedges.instanceMatrix.needsUpdate = true;
+    if (hedges.instanceColor) hedges.instanceColor.needsUpdate = true;
+    this.scene.add(hedges);
+
+    // --- Shrubs: scattered, thicker near woodlot edges ---
+    const stands = [
+      { cx: -72, cz: -55, rx: 30, rz: 34 }, { cx: -38, cz: 78, rx: 24, rz: 28 },
+      { cx: 78, cz: 118, rx: 30, rz: 30 }, { cx: 66, cz: -34, rx: 28, rz: 26 },
+      { cx: -62, cz: 30, rx: 26, rz: 30 }, { cx: 14, cz: 8, rx: 13, rz: 15 },
+    ];
+    const shrubCount = 450;
+    const shrubs = new THREE.InstancedMesh(bushGeo, bushMat, shrubCount);
+    let si = 0;
+    for (let i = 0; i < shrubCount * 4 && si < shrubCount; i++) {
+      const x = (Math.random() - 0.5) * 330, z = (Math.random() - 0.5) * 330;
+      if (Math.abs(x) > 168 || Math.abs(z) > 168) continue;
+      if (Math.abs(x + 14) < 3.4 && z > -115 && z < 115) continue; // keep the pike clear
+      // density gate: near woods or patchy open ground
+      const nearWoods = stands.some(st => ((x - st.cx) / st.rx) ** 2 + ((z - st.cz) / st.rz) ** 2 < 1.6);
+      if (!nearWoods && hash(x * 5.3, z * 4.1) > 0.28) continue;
+      const s = 0.35 + Math.random() * 0.55;
+      dummy.position.set(x, this.getTerrainHeight(x, z) + 0.3 * s, z);
+      dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+      dummy.scale.set(s * 1.3, s * 0.8, s * 1.3);
+      dummy.updateMatrix();
+      shrubs.setMatrixAt(si, dummy.matrix);
+      col.setHSL(0.22 + Math.random() * 0.08, 0.38 + Math.random() * 0.22, 0.18 + Math.random() * 0.1);
+      shrubs.setColorAt(si, col);
+      si++;
+    }
+    shrubs.count = si;
+    shrubs.instanceMatrix.needsUpdate = true;
+    if (shrubs.instanceColor) shrubs.instanceColor.needsUpdate = true;
+    this.scene.add(shrubs);
+
+    // --- Underbrush: low dark clumps deep inside the woodlots ---
+    const underCount = 700;
+    const underGeo = new THREE.ConeGeometry(0.32, 0.5, 6);
+    underGeo.translate(0, 0.22, 0);
+    const underMat = new THREE.MeshStandardMaterial({ roughness: 1, flatShading: true });
+    const under = new THREE.InstancedMesh(underGeo, underMat, underCount);
+    let ui = 0;
+    for (let i = 0; i < underCount * 4 && ui < underCount; i++) {
+      const st = stands[(Math.random() * stands.length) | 0];
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(Math.random());
+      const x = st.cx + Math.cos(a) * st.rx * r;
+      const z = st.cz + Math.sin(a) * st.rz * r;
+      if (Math.abs(x) > 168 || Math.abs(z) > 168) continue;
+      const s = 0.7 + Math.random() * 1.3;
+      dummy.position.set(x, this.getTerrainHeight(x, z), z);
+      dummy.rotation.set((Math.random() - 0.5) * 0.3, Math.random() * Math.PI * 2, 0);
+      dummy.scale.set(s, s * (0.7 + Math.random() * 0.6), s);
+      dummy.updateMatrix();
+      under.setMatrixAt(ui, dummy.matrix);
+      col.setHSL(0.25 + Math.random() * 0.05, 0.32, 0.1 + Math.random() * 0.08);
+      under.setColorAt(ui, col);
+      ui++;
+    }
+    under.count = ui;
+    under.instanceMatrix.needsUpdate = true;
+    if (under.instanceColor) under.instanceColor.needsUpdate = true;
+    this.scene.add(under);
   }
 
   private createArtilleryCannon(x: number, y: number, z: number, rotY: number, id: string) {
@@ -2227,6 +2495,9 @@ export class GettysburgEngine {
     if (this.combo === 3) audio.playStreakFanfare(3);
     if (this.combo === 5) audio.playStreakFanfare(5);
 
+    // Veteran experience — the drill gets faster as the soldier seasons
+    this.awardVeteranXP((isHeadshot ? 150 : 100) + (isMelee ? 150 : 0) + (enemy.isBoss ? 500 : 0));
+
     const basePoints = (isHeadshot ? 150 : 100) + (isMelee ? 150 : 0) + (enemy.isBoss ? 500 : 0);
     const multiplier = Math.min(5, this.combo);
     const totalPoints = basePoints * multiplier;
@@ -2394,7 +2665,7 @@ export class GettysburgEngine {
     audio.playReloadStage('POWDER');
 
     const isAuthentic = this.historicalSettings.weaponBehavior === 'AUTHENTIC';
-    const totalTime = isAuthentic ? (wData.authenticReloadTime || 12.0) : wData.reloadTime;
+    const totalTime = (isAuthentic ? (wData.authenticReloadTime || 12.0) : wData.reloadTime) * this.veteranReloadScale();
     const interval = 50;
     let elapsed = 0;
 
@@ -2918,7 +3189,6 @@ export class GettysburgEngine {
     }
   }
 
-  private minimapBroadcastTimer = 0;
   private updateInteractivePromptsAndMinimap(dt: number) {
     // 1. Proximity interactive prompt
     if (this.mountedCannon) {
@@ -2977,7 +3247,7 @@ export class GettysburgEngine {
       // Player
       entities.push({
         id: 'player',
-        type: 'PLAYER',
+        type: 'player',
         faction: this.playerFaction,
         x: this.playerPos.x,
         z: this.playerPos.z,
@@ -2989,7 +3259,7 @@ export class GettysburgEngine {
         if (enemy.isDead) continue;
         entities.push({
           id: enemy.id,
-          type: 'ENEMY',
+          type: 'enemy',
           faction: enemy.faction,
           x: enemy.x,
           z: enemy.z,
@@ -3000,7 +3270,7 @@ export class GettysburgEngine {
       for (const cannon of this.artilleryPieces) {
         entities.push({
           id: cannon.id,
-          type: 'CANNON',
+          type: 'cannon',
           x: cannon.position.x,
           z: cannon.position.z,
         });
@@ -3010,7 +3280,7 @@ export class GettysburgEngine {
       for (const door of this.interactiveDoors) {
         entities.push({
           id: door.id,
-          type: 'DOOR',
+          type: 'door',
           x: door.position.x,
           z: door.position.z,
         });

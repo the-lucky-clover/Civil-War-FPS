@@ -8,7 +8,10 @@ interface PauseMenuProps {
   onQuitToTitle: () => void;
   crtScanlines: boolean;
   onToggleCrt: () => void;
+  veteranRank?: { index: number; name: string; xp: number };
 }
+
+const RANK_THRESHOLDS = [0, 300, 800, 1500, 2500, 3800, 5400, 7500, 10000, 13000];
 
 export const PauseMenu: React.FC<PauseMenuProps> = ({
   onResume,
@@ -16,6 +19,7 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
   onQuitToTitle,
   crtScanlines,
   onToggleCrt,
+  veteranRank,
 }) => {
   const [showAudioSettings, setShowAudioSettings] = useState<boolean>(true);
   const [masterVol, setMasterVol] = useState<number>(Math.round(audio.getMasterVolume() * 100));
@@ -50,6 +54,31 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
             THE BATTLE OF GETTYSBURG &bull; JULY 1863
           </p>
         </div>
+
+        {/* Service record — veteran rank, persisted locally */}
+        {veteranRank && (
+          <div className="bg-[#1a120b]/80 border border-[#d4af37]/40 rounded-lg px-4 py-3">
+            <div className="text-[10px] font-sans tracking-[0.25em] uppercase text-[#8b7355]">Service Record</div>
+            <div className="text-lg font-vintage font-bold text-[#f4ecd8] mt-0.5">{veteranRank.name}</div>
+            {veteranRank.index < RANK_THRESHOLDS.length - 1 ? (
+              <>
+                <div className="w-full h-1.5 bg-[#0a0806] rounded-full border border-[#3d2b1f] overflow-hidden mt-2">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#8b7355] to-[#d4af37]"
+                    style={{
+                      width: `${Math.min(100, ((veteranRank.xp - RANK_THRESHOLDS[veteranRank.index]) / (RANK_THRESHOLDS[veteranRank.index + 1] - RANK_THRESHOLDS[veteranRank.index])) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <div className="text-[10px] font-mono text-[#8b7355] mt-1">
+                  {RANK_THRESHOLDS[veteranRank.index + 1] - veteranRank.xp} XP to next rank &mdash; the drill quickens with every stripe
+                </div>
+              </>
+            ) : (
+              <div className="text-[10px] font-mono text-[#d4af37] mt-1">Highest rank attained &mdash; a veteran of the old school</div>
+            )}
+          </div>
+        )}
 
         {/* Action Buttons */}
         <div className="flex flex-col gap-2">

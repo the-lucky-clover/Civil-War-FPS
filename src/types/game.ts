@@ -185,6 +185,7 @@ export interface MinimapEntity {
   x: number;
   z: number;
   rotY?: number;
+  yaw?: number;
   faction?: Faction;
   isBoss?: boolean;
 }
