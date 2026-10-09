@@ -148,6 +148,13 @@ export class GettysburgEngine {
   public yaw: number = 0;
   public pitch: number = 0;
   public isGrounded: boolean = true;
+  private verticalVel: number = 0;   // jump / fall velocity (m/s)
+  private jumpY: number = 0;        // airborne height above terrain
+  private jumpQueued: boolean = false;
+  private eyeHeightSm: number = 1.7; // smoothed eye height (crouch transitions)
+  private treeColliders: { x: number; z: number; r: number }[] = [];
+  private ramrodMesh: THREE.Mesh | null = null;
+  private hammerMesh: THREE.Mesh | null = null;
   public isSprinting: boolean = false;
   public isCrouching: boolean = false;
 
@@ -310,19 +317,19 @@ export class GettysburgEngine {
     const flashGeo = new THREE.DodecahedronGeometry(0.12, 1);
     const flashMat = new THREE.MeshBasicMaterial({ color: 0xFFDD44, transparent: true, opacity: 0 });
     this.muzzleFlashMesh = new THREE.Mesh(flashGeo, flashMat);
-    this.muzzleFlashMesh.position.set(0.12, -0.05, -1.2);
+    this.muzzleFlashMesh.position.set(0, 0.03, -1.35);
     this.gunPivot.add(this.muzzleFlashMesh);
 
     this.muzzleFlashLight = new THREE.PointLight(0xFF8822, 0, 15);
-    this.muzzleFlashLight.position.set(0.12, -0.05, -1.2);
+    this.muzzleFlashLight.position.set(0, 0.03, -1.35);
     this.gunPivot.add(this.muzzleFlashLight);
 
     // Bayonet Mesh
     const bayonetGeo = new THREE.ConeGeometry(0.02, 0.45, 4);
     const bayonetMat = new THREE.MeshStandardMaterial({ color: 0xCCCCCC, metalness: 0.9, roughness: 0.2 });
     this.bayonetMesh = new THREE.Mesh(bayonetGeo, bayonetMat);
-    this.bayonetMesh.rotation.x = Math.PI / 2;
-    this.bayonetMesh.position.set(0.04, -0.02, -1.35);
+    this.bayonetMesh.rotation.x = -Math.PI / 2; // tip forward
+    this.bayonetMesh.position.set(0, 0.02, -1.52);
     this.musketMesh.add(this.bayonetMesh);
 
     this.setupEnvironment();
@@ -366,6 +373,7 @@ export class GettysburgEngine {
     const hammer = new THREE.Mesh(hammerGeo, hammerMat);
     hammer.position.set(0.04, 0.04, -0.15);
     gun.add(hammer);
+    this.hammerMesh = hammer;
 
     // Ramrod underneath
     const ramrodGeo = new THREE.CylinderGeometry(0.008, 0.008, 1.2, 8);
@@ -374,6 +382,18 @@ export class GettysburgEngine {
     ramrod.rotation.x = Math.PI / 2;
     ramrod.position.set(0, -0.035, -0.7);
     gun.add(ramrod);
+    this.ramrodMesh = ramrod;
+
+    // Iron sights — front blade + rear notch, aligned to the bore
+    const sightMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.7, roughness: 0.4 });
+    const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.055, 0.014), sightMat);
+    frontSight.position.set(0, 0.05, -1.18);
+    gun.add(frontSight);
+    const rearL = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.05, 0.03), sightMat);
+    rearL.position.set(-0.024, 0.05, -0.3);
+    const rearR = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.05, 0.03), sightMat);
+    rearR.position.set(0.024, 0.05, -0.3);
+    gun.add(rearL, rearR);
 
     // Whitworth Brass Scope if sniper
     if (this.currentWeaponKey.includes('whitworth')) {
@@ -385,8 +405,42 @@ export class GettysburgEngine {
       gun.add(scope);
     }
 
-    gun.position.set(0.24, -0.22, -0.45);
+    gun.position.set(0, 0, 0); // pivot carries all positioning — no double offset
     return gun;
+  }
+
+  /**
+   * Gettysburg, July 1863 — compressed but faithful heightfield.
+   * 1 unit ≈ 8 m. Ridges run N-S; the Angle sits on Cemetery Ridge.
+   */
+  private gettysburgHeight(x: number, z: number): number {
+    const gauss = (cx: number, cz: number, sx: number, sz: number) => {
+      const dx = (x - cx) / sx, dz = (z - cz) / sz;
+      return Math.exp(-(dx * dx + dz * dz));
+    };
+    // Rolling Adams County farmland base
+    let h = Math.sin(x * 0.021) * 1.1 + Math.cos(z * 0.026) * 0.9 + Math.sin(x * 0.09 + z * 0.06) * 0.35;
+    h += 5.5 * gauss(20, -10, 17, 95);    // Cemetery Ridge — Union main line
+    h += 4.5 * gauss(-58, 0, 15, 90);     // Seminary Ridge — Confederate line
+    h += 7.0 * gauss(-2, -78, 24, 26);    // Cemetery Hill — north anchor
+    h += 9.0 * gauss(72, -38, 21, 24);    // Culp's Hill
+    h += 13.0 * gauss(62, 96, 17, 19);   // Little Round Top
+    h += 19.0 * gauss(82, 128, 22, 24);   // Big Round Top
+    h += 3.5 * gauss(34, 72, 12, 10);     // Devil's Den knob
+    h += 5.0 * gauss(38, -52, 14, 12);    // Powers Hill
+    h += 3.0 * gauss(-78, -48, 16, 30);   // McPherson Ridge (Day 1)
+    h -= 1.6 * gauss(30, 80, 22, 26);     // Plum Run valley dip
+    return h;
+  }
+
+  /** World-space terrain height — the single source of truth for grounding. */
+  public getTerrainHeight(x: number, z: number): number {
+    return this.gettysburgHeight(x, z);
+  }
+
+  /** Snap any scenery object onto the terrain. */
+  private placeOnTerrain(obj: THREE.Object3D, x: number, z: number, yOff = 0) {
+    obj.position.set(x, this.getTerrainHeight(x, z) + yOff, z);
   }
 
   private setupEnvironment() {
@@ -434,21 +488,56 @@ export class GettysburgEngine {
     this.dirLight.shadow.mapSize.height = 2048;
     this.scene.add(this.dirLight);
 
-    // Ground
-    const groundGeo = new THREE.PlaneGeometry(350, 350, 64, 64);
+    // Ground — Gettysburg 1863 heightfield with painted vertex colors
+    const groundGeo = new THREE.PlaneGeometry(350, 350, 110, 110);
     const posAttr = groundGeo.attributes.position;
+    const colorAttr = new Float32Array(posAttr.count * 3);
+    const cGrass = new THREE.Color(0x55682a);
+    const cGrassDry = new THREE.Color(0x6f7a36);
+    const cDirt = new THREE.Color(0x6b5136);
+    const cRock = new THREE.Color(0x6e6a63);
+    const cWheat = new THREE.Color(0xb59a4a);
+    const cOrchard = new THREE.Color(0x4a6b2a);
+    const tmpC = new THREE.Color();
+    const hash2 = (x: number, z: number) => {
+      const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+      return s - Math.floor(s);
+    };
     for (let i = 0; i < posAttr.count; i++) {
-      const vx = posAttr.getX(i);
-      const vy = posAttr.getY(i);
-      const ridgeHeight = Math.sin(vx * 0.03) * 2.5 + Math.cos(vy * 0.02) * 2.0;
-      posAttr.setZ(i, ridgeHeight);
+      const wx = posAttr.getX(i);
+      const wz = -posAttr.getY(i); // plane Y maps to world -Z after rotation
+      const h = this.getTerrainHeight(wx, wz);
+      posAttr.setZ(i, h);
+      // slope for rock exposure
+      const e = 1.6;
+      const sx = (this.getTerrainHeight(wx + e, wz) - this.getTerrainHeight(wx - e, wz)) / (2 * e);
+      const sz = (this.getTerrainHeight(wx, wz + e) - this.getTerrainHeight(wx, wz - e)) / (2 * e);
+      const slope = Math.sqrt(sx * sx + sz * sz);
+      tmpC.copy(cGrass).lerp(cGrassDry, hash2(wx * 0.7, wz * 0.7) * 0.8);
+      if (h > 8) tmpC.lerp(cRock, Math.min(1, (h - 8) / 9) * 0.65); // rocky hilltops
+      if (slope > 0.5) tmpC.lerp(cRock, Math.min(1, (slope - 0.5) * 1.6) * 0.7); // steep = rock
+      // Devil's Den rock field
+      const dd = ((wx - 34) / 14) ** 2 + ((wz - 72) / 12) ** 2;
+      if (dd < 1) tmpC.lerp(cRock, 0.75 * (1 - dd));
+      // Emmitsburg Road — dirt pike running N-S between the ridges
+      if (Math.abs(wx + 14) < 2.6 && wz > -115 && wz < 115) {
+        tmpC.lerp(cDirt, Math.abs(wx + 14) < 1.1 ? 0.9 : 0.55);
+      }
+      // The Wheatfield — golden
+      const wf = ((wx - 2) / 17) ** 2 + ((wz - 52) / 14) ** 2;
+      if (wf < 1) tmpC.lerp(cWheat, 0.85 * (1 - wf));
+      // Peach Orchard
+      const po = ((wx + 28) / 15) ** 2 + ((wz - 58) / 11) ** 2;
+      if (po < 1) tmpC.lerp(cOrchard, 0.7 * (1 - po));
+      colorAttr[i * 3] = tmpC.r; colorAttr[i * 3 + 1] = tmpC.g; colorAttr[i * 3 + 2] = tmpC.b;
     }
+    groundGeo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 3));
     groundGeo.computeVertexNormals();
 
     const groundMat = new THREE.MeshStandardMaterial({
-      color: this.currentMissionId === 'day2_wheatfield_night' ? 0x2A3520 : 0x4A5D23,
-      roughness: 0.9,
-      metalness: 0.1,
+      vertexColors: true,
+      roughness: 0.95,
+      metalness: 0.0,
     });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
@@ -793,79 +882,64 @@ export class GettysburgEngine {
   }
 
   private buildGettysburgScenery() {
-    // 1. Stone Wall at The Angle
+    // 1. Stone Wall at The Angle — on the Cemetery Ridge crest (Union line)
     const stoneWallMat = new THREE.MeshStandardMaterial({ color: 0x777571, roughness: 0.95 });
-    for (let x = -40; x <= 40; x += 3.8) {
-      const stoneMesh = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.9, 0.8), stoneWallMat);
-      stoneMesh.position.set(x, 0.45, 0);
-      stoneMesh.castShadow = true;
-      stoneMesh.receiveShadow = true;
-      this.scene.add(stoneMesh);
-    }
-
-    // 2. The 90-degree Angle section
-    for (let z = 0; z <= 30; z += 3.8) {
+    for (let z = -32; z <= 24; z += 3.8) {
       const stoneMesh = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.9, 3.6), stoneWallMat);
-      stoneMesh.position.set(40, 0.45, z);
       stoneMesh.castShadow = true;
       stoneMesh.receiveShadow = true;
+      this.placeOnTerrain(stoneMesh, 20, z, 0.45);
       this.scene.add(stoneMesh);
     }
 
-    // 3. Worm Fences
+    // 2. The 90-degree Angle section — wall jogs east at the Copse
+    for (let x = 20; x <= 44; x += 3.8) {
+      const stoneMesh = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.9, 0.8), stoneWallMat);
+      stoneMesh.castShadow = true;
+      stoneMesh.receiveShadow = true;
+      this.placeOnTerrain(stoneMesh, x, 24, 0.45);
+      this.scene.add(stoneMesh);
+    }
+
+    // 3. Worm Fences — west of Emmitsburg Road
     const woodMat = new THREE.MeshStandardMaterial({ color: 0x6E543C, roughness: 0.85 });
     for (let z = -50; z >= -120; z -= 8) {
       const rail1 = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 8.5), woodMat);
-      rail1.position.set(-25, 0.7, z);
       rail1.rotation.y = (z % 16 === 0 ? 0.3 : -0.3);
       rail1.castShadow = true;
+      this.placeOnTerrain(rail1, -24, z, 0.7);
       this.scene.add(rail1);
     }
 
-    // 4. Granite Boulders
+    // 4. Granite Boulders — scattered + the Devil's Den rock field
     const boulderMat = new THREE.MeshStandardMaterial({ color: 0x55585E, roughness: 0.9 });
-    for (let i = 0; i < 28; i++) {
-      const radius = 1.5 + Math.random() * 2.8;
+    const dropBoulder = (bx: number, bz: number, radius: number) => {
       const boulder = new THREE.Mesh(new THREE.DodecahedronGeometry(radius, 1), boulderMat);
-      const bx = (Math.random() - 0.5) * 140;
-      const bz = (Math.random() - 0.5) * 140;
-      boulder.position.set(bx, radius * 0.7, bz);
+      boulder.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
       boulder.castShadow = true;
       boulder.receiveShadow = true;
+      this.placeOnTerrain(boulder, bx, bz, radius * 0.45);
       this.scene.add(boulder);
       this.boulderLocations.push({ x: bx, z: bz, radius });
+      this.treeColliders.push({ x: bx, z: bz, r: radius * 0.8 });
+    };
+    for (let i = 0; i < 24; i++) {
+      const radius = 1.5 + Math.random() * 2.8;
+      dropBoulder((Math.random() - 0.5) * 140, (Math.random() - 0.5) * 140, radius);
+    }
+    for (let i = 0; i < 14; i++) { // Devil's Den — massive jumbled granite
+      const a = Math.random() * Math.PI * 2, r = Math.random() * 11;
+      dropBoulder(34 + Math.cos(a) * r, 72 + Math.sin(a) * r * 0.8, 2.5 + Math.random() * 3.5);
     }
 
-    // 5. Trees (Copse & Woods)
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4A3525, roughness: 0.9 });
-    const foliageMat = new THREE.MeshStandardMaterial({
-      color: this.currentMissionId === 'day2_roundtop' ? 0x2E4A1F : 0x385E26,
-      roughness: 0.8,
-    });
-
-    for (let i = 0; i < 45; i++) {
-      const tree = new THREE.Group();
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.45, 4.5, 8), trunkMat);
-      trunk.position.y = 2.25;
-      trunk.castShadow = true;
-      const foliage = new THREE.Mesh(new THREE.DodecahedronGeometry(2.4 + Math.random() * 1.2, 1), foliageMat);
-      foliage.position.y = 4.8;
-      foliage.castShadow = true;
-      tree.add(trunk, foliage);
-
-      const tx = (Math.random() - 0.5) * 180;
-      const tz = (Math.random() - 0.5) * 180;
-      if (Math.abs(tx) > 8 || Math.abs(tz) > 8) {
-        tree.position.set(tx, 0, tz);
-        this.scene.add(tree);
-      }
-    }
+    // 5. Forests — instanced organic stands (see createForests)
+    this.createForests();
 
     // 6. Interactive Artillery Cannons
-    this.createArtilleryCannon(-15, 0, -10, 0, 'cannon_north_1');
-    this.createArtilleryCannon(15, 0, -10, 0, 'cannon_north_2');
-    this.createArtilleryCannon(-30, 0, 45, Math.PI, 'cannon_south_1');
-    this.createArtilleryCannon(30, 0, 45, Math.PI, 'cannon_south_2');
+    this.createArtilleryCannon(-15, this.getTerrainHeight(-15, -10), -10, 0, 'cannon_north_1');
+    this.createArtilleryCannon(15, this.getTerrainHeight(15, -10), -10, 0, 'cannon_north_2');
+    this.createArtilleryCannon(-30, this.getTerrainHeight(-30, 45), 45, Math.PI, 'cannon_south_1');
+    this.createArtilleryCannon(30, this.getTerrainHeight(30, 45), 45, Math.PI, 'cannon_south_2');
 
     // 7. Interactive Barn & Pennsylvania Farmhouse with Swinging Doors
     this.createBarnAndDoors(22, -18);
@@ -873,13 +947,145 @@ export class GettysburgEngine {
     // 8. Military Camps, Field Hospital, Mess Hall & POW Enclosure
     this.createMilitaryCampsAndHospital();
 
-    // 9. Capture The Flag Waypoints (The Angle, Seminary Ridge, Copse of Trees)
-    this.createFlagPole(0, 0, 0, 'The Angle', 'NORTH', 'flag_angle');
-    this.createFlagPole(-25, 0, 18, 'Copse of Trees', 'NEUTRAL', 'flag_copse');
-    this.createFlagPole(28, 0, 45, 'Seminary Ridge', 'SOUTH', 'flag_seminary');
+    // 9. Capture The Flag Waypoints (The Angle, Copse of Trees, Seminary Ridge)
+    this.createFlagPole(20, this.getTerrainHeight(20, 6), 6, 'The Angle', 'NORTH', 'flag_angle');
+    this.createFlagPole(14, this.getTerrainHeight(14, 8), 8, 'Copse of Trees', 'NEUTRAL', 'flag_copse');
+    this.createFlagPole(-58, this.getTerrainHeight(-58, 10), 10, 'Seminary Ridge', 'SOUTH', 'flag_seminary');
 
     // 10. Ambient 50/50 Skirmish Lines
     this.createAmbientSkirmishers();
+  }
+
+  /**
+   * Lush organic forests of Gettysburg — instanced trunks + two canopy layers
+   * (3 draw calls for ~900 trees) with per-instance color variation, plus
+   * instanced grass tufts. Trees are grounded to the terrain and registered
+   * as collision cylinders.
+   */
+  private createForests() {
+    interface Stand { cx: number; cz: number; rx: number; rz: number; d: number; n: number }
+    const stands: Stand[] = [
+      { cx: -72, cz: -55, rx: 26, rz: 30, d: 0.85, n: 300 },  // Herbst Woods (McPherson Ridge)
+      { cx: -38, cz: 78, rx: 20, rz: 24, d: 0.8, n: 280 },    // Rose Woods
+      { cx: 78, cz: 118, rx: 26, rz: 26, d: 0.9, n: 300 },    // Big Round Top woods
+      { cx: 58, cz: 92, rx: 18, rz: 18, d: 0.5, n: 200 },     // Little Round Top (rocky, sparser)
+      { cx: 66, cz: -34, rx: 24, rz: 22, d: 0.85, n: 280 },   // Culp's Hill / Spangler's Spring
+      { cx: -62, cz: 30, rx: 22, rz: 26, d: 0.75, n: 260 },   // Pitzer Woods
+      { cx: 30, cz: -62, rx: 14, rz: 12, d: 0.5, n: 140 },    // Ziegler's Grove
+      { cx: 14, cz: 8, rx: 9, rz: 11, d: 1.0, n: 110 },       // THE COPSE OF TREES (landmark)
+    ];
+    const hash = (x: number, z: number) => {
+      const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    // Pronounced clumping — low-frequency noise gates growth
+    const clump = (x: number, z: number) =>
+      Math.sin(x * 0.05) * Math.cos(z * 0.043) + Math.sin(x * 0.13 + z * 0.11) * 0.5 > -0.3;
+
+    const spots: { x: number; z: number; s: number }[] = [];
+    for (const st of stands) {
+      for (let i = 0; i < st.n; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.sqrt(Math.random());
+        const x = st.cx + Math.cos(a) * st.rx * r;
+        const z = st.cz + Math.sin(a) * st.rz * r;
+        if (Math.abs(x) > 168 || Math.abs(z) > 168) continue;
+        if (hash(x * 3.1, z * 3.7) > st.d) continue;
+        if (!clump(x, z)) continue;
+        spots.push({ x, z, s: 0.75 + Math.random() * 0.75 });
+      }
+    }
+    // Sparse field trees between the woodlots
+    for (let i = 0; i < 300; i++) {
+      const x = (Math.random() - 0.5) * 330, z = (Math.random() - 0.5) * 330;
+      if (Math.abs(x) > 168 || Math.abs(z) > 168) continue;
+      if (hash(x * 1.7, z * 2.3) > 0.05) continue;
+      spots.push({ x, z, s: 0.7 + Math.random() * 0.6 });
+    }
+
+    const count = spots.length;
+    const dummy = new THREE.Object3D();
+    const col = new THREE.Color();
+
+    // Trunks — tapered, slight random lean
+    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.36, 4.6, 7);
+    trunkGeo.translate(0, 2.3, 0);
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3525, roughness: 0.95 });
+    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
+    trunks.castShadow = true;
+
+    // Canopy — two organic layers
+    const canopyGeo = new THREE.IcosahedronGeometry(2.3, 1);
+    const canopyMat = new THREE.MeshStandardMaterial({ roughness: 0.85 });
+    const canopyLow = new THREE.InstancedMesh(canopyGeo, canopyMat, count);
+    const canopyTop = new THREE.InstancedMesh(canopyGeo, canopyMat, count);
+    canopyLow.castShadow = true; canopyTop.castShadow = true;
+
+    for (let i = 0; i < count; i++) {
+      const t = spots[i];
+      const gy = this.getTerrainHeight(t.x, t.z);
+      const yaw = Math.random() * Math.PI * 2;
+      const lean = (Math.random() - 0.5) * 0.09;
+      const hScale = t.s * (0.9 + Math.random() * 0.35);
+
+      dummy.position.set(t.x, gy - 0.15, t.z);
+      dummy.rotation.set(lean, yaw, (Math.random() - 0.5) * 0.09);
+      dummy.scale.set(t.s, hScale, t.s);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+
+      // Lower canopy — wide, asymmetric
+      dummy.position.set(t.x + (Math.random() - 0.5) * 0.8, gy + 3.9 * hScale, t.z + (Math.random() - 0.5) * 0.8);
+      dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+      dummy.scale.set(t.s * (1.0 + Math.random() * 0.45), t.s * (0.72 + Math.random() * 0.3), t.s * (1.0 + Math.random() * 0.45));
+      dummy.updateMatrix();
+      canopyLow.setMatrixAt(i, dummy.matrix);
+      col.setHSL(0.24 + Math.random() * 0.09, 0.38 + Math.random() * 0.16, 0.2 + Math.random() * 0.11);
+      canopyLow.setColorAt(i, col);
+
+      // Crown — smaller, offset for organic silhouette
+      dummy.position.set(t.x + (Math.random() - 0.5) * 1.4, gy + 5.4 * hScale, t.z + (Math.random() - 0.5) * 1.4);
+      dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+      dummy.scale.set(t.s * (0.62 + Math.random() * 0.3), t.s * (0.6 + Math.random() * 0.28), t.s * (0.62 + Math.random() * 0.3));
+      dummy.updateMatrix();
+      canopyTop.setMatrixAt(i, dummy.matrix);
+      col.setHSL(0.25 + Math.random() * 0.08, 0.4 + Math.random() * 0.14, 0.23 + Math.random() * 0.1);
+      canopyTop.setColorAt(i, col);
+
+      this.treeColliders.push({ x: t.x, z: t.z, r: 0.55 * t.s });
+    }
+    trunks.instanceMatrix.needsUpdate = true;
+    canopyLow.instanceMatrix.needsUpdate = true;
+    canopyTop.instanceMatrix.needsUpdate = true;
+    if (canopyLow.instanceColor) canopyLow.instanceColor.needsUpdate = true;
+    if (canopyTop.instanceColor) canopyTop.instanceColor.needsUpdate = true;
+    this.scene.add(trunks, canopyLow, canopyTop);
+
+    // Grass tufts — one instanced draw call, dense in open ground
+    const grassGeo = new THREE.ConeGeometry(0.09, 0.55, 5);
+    grassGeo.translate(0, 0.27, 0);
+    const grassMat = new THREE.MeshStandardMaterial({ roughness: 0.9 });
+    const grassCount = 1600;
+    const grass = new THREE.InstancedMesh(grassGeo, grassMat, grassCount);
+    let gi = 0;
+    for (let i = 0; i < grassCount * 3 && gi < grassCount; i++) {
+      const x = (Math.random() - 0.5) * 330, z = (Math.random() - 0.5) * 330;
+      if (Math.abs(x) > 168 || Math.abs(z) > 168) continue;
+      if (hash(x * 5.3, z * 4.1) > 0.45) continue; // patchy
+      const s = 0.7 + Math.random() * 1.1;
+      dummy.position.set(x, this.getTerrainHeight(x, z), z);
+      dummy.rotation.set((Math.random() - 0.5) * 0.35, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.35);
+      dummy.scale.set(s, s * (0.8 + Math.random() * 0.7), s);
+      dummy.updateMatrix();
+      grass.setMatrixAt(gi, dummy.matrix);
+      col.setHSL(0.19 + Math.random() * 0.1, 0.42 + Math.random() * 0.2, 0.24 + Math.random() * 0.12);
+      grass.setColorAt(gi, col);
+      gi++;
+    }
+    grass.count = gi;
+    grass.instanceMatrix.needsUpdate = true;
+    if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
+    this.scene.add(grass);
   }
 
   private createArtilleryCannon(x: number, y: number, z: number, rotY: number, id: string) {
@@ -955,7 +1161,7 @@ export class GettysburgEngine {
     trimTop.position.y = 5.65;
     barnGroup.add(trimTop);
 
-    barnGroup.position.set(x, 0, z);
+    barnGroup.position.set(x, this.getTerrainHeight(x, z), z);
     this.scene.add(barnGroup);
 
     // Two Interactive Barn Doors
@@ -1018,7 +1224,7 @@ export class GettysburgEngine {
       crate.position.set(1.4, 0.25, 0);
       tent.add(crate);
 
-      tent.position.set(-20 - i * 4.5, 0, -32 - (i % 2) * 3);
+      this.placeOnTerrain(tent, -20 - i * 4.5, -32 - (i % 2) * 3, 0);
       this.scene.add(tent);
     }
 
@@ -1040,7 +1246,7 @@ export class GettysburgEngine {
     const fireLight = new THREE.PointLight(0xFFA726, 1.8, 12);
     fireLight.position.y = 0.5;
     campfire.add(fireLight);
-    campfire.position.set(-26, 0, -28);
+    this.placeOnTerrain(campfire, -26, -28, 0);
     this.scene.add(campfire);
 
     // 2. Field Hospital (Large tent with Red Cross Geneva banner)
@@ -1085,7 +1291,7 @@ export class GettysburgEngine {
     blanket.position.set(3.2, 0.28, 1.4);
     hospitalGroup.add(stretcher, blanket);
 
-    hospitalGroup.position.set(32, 0, -32);
+    this.placeOnTerrain(hospitalGroup, 32, -32, 0);
     this.scene.add(hospitalGroup);
 
     // 3. Mess Hall (Supply Wagon & Hardtack Barrels)
@@ -1120,7 +1326,7 @@ export class GettysburgEngine {
     b2.position.set(2.4, 0.45, 1.2);
     wagonGroup.add(b1, b2);
 
-    wagonGroup.position.set(-18, 0, -18);
+    this.placeOnTerrain(wagonGroup, -18, -18, 0);
     this.scene.add(wagonGroup);
 
     // 4. Confederate POW Pen Enclosure
@@ -1143,7 +1349,7 @@ export class GettysburgEngine {
     sentry.rotation.y = -Math.PI / 2;
     powPen.add(sentry);
 
-    powPen.position.set(26, 0, -12);
+    this.placeOnTerrain(powPen, 26, -12, 0);
     this.scene.add(powPen);
   }
 
@@ -1194,13 +1400,13 @@ export class GettysburgEngine {
   }
 
   private createAmbientSkirmishers() {
-    // 12 Union soldiers along stone wall
+    // 12 Union soldiers along the stone wall on Cemetery Ridge, facing west
     for (let i = 0; i < 12; i++) {
       const soldier = this.createSoldierMesh('NORTH', 'PRIVATE');
-      const sx = -35 + i * 6.5;
-      const sz = -1.8;
-      soldier.position.set(sx, 0, sz);
-      soldier.rotation.y = 0; // facing forward South
+      const sx = 18.4;
+      const sz = -28 + i * 4.6;
+      this.placeOnTerrain(soldier, sx, sz, 0);
+      soldier.rotation.y = -Math.PI / 2; // facing west, toward Seminary Ridge
       this.scene.add(soldier);
       this.ambientSoldiers.push({
         group: soldier,
@@ -1211,13 +1417,13 @@ export class GettysburgEngine {
       });
     }
 
-    // 12 Confederate skirmishers across the open field
+    // 12 Confederate skirmishers advancing across the fields, facing east
     for (let i = 0; i < 12; i++) {
       const soldier = this.createSoldierMesh('SOUTH', 'PRIVATE');
-      const sx = -36 + i * 6.8;
-      const sz = 55 + (Math.random() - 0.5) * 8;
-      soldier.position.set(sx, 0, sz);
-      soldier.rotation.y = Math.PI; // facing North towards wall
+      const sx = -34 + (i % 2) * 5;
+      const sz = -25 + i * 4.5 + (Math.random() - 0.5) * 3;
+      this.placeOnTerrain(soldier, sx, sz, 0);
+      soldier.rotation.y = Math.PI / 2; // facing east, toward the Angle
       this.scene.add(soldier);
       this.ambientSoldiers.push({
         group: soldier,
@@ -1331,6 +1537,10 @@ export class GettysburgEngine {
     window.addEventListener('keydown', (e) => {
       this.keys[e.code] = true;
 
+      if (e.code === 'Space') {
+        e.preventDefault();
+        this.jumpQueued = true;
+      }
       if (e.code === 'KeyR' && !this.isReloading && !this.mountedCannon) {
         this.startReload();
       }
@@ -1749,14 +1959,16 @@ export class GettysburgEngine {
       const isBoss = (waveNumber === this.totalWaves && i === 0);
       const isSharpshooter = (i % 3 === 0);
       const charType = isBoss ? 'OFFICER_BOSS' : (isSharpshooter ? 'SHARPSHOOTER' : 'PRIVATE');
+      const spawnX = (Math.random() - 0.5) * 80;
+      const spawnZPos = spawnZ + (Math.random() - 0.5) * 20;
 
       const enemy: EnemyNPC = {
         id: `npc_${waveNumber}_${i}`,
         name: isBoss ? (enemyFaction === 'SOUTH' ? 'Gen. Armistead' : 'Col. Chamberlain') : (enemyFaction === 'SOUTH' ? `Rebel Pvt. #${i + 1}` : `Union Pvt. #${i + 1}`),
         faction: enemyFaction,
-        x: (Math.random() - 0.5) * 80,
-        y: 0,
-        z: spawnZ + (Math.random() - 0.5) * 20,
+        x: spawnX,
+        y: this.getTerrainHeight(spawnX, spawnZPos),
+        z: spawnZPos,
         rotY: enemyFaction === 'SOUTH' ? Math.PI : 0,
         health: isBoss ? 350 : (isSharpshooter ? 75 : 100),
         maxHealth: isBoss ? 350 : (isSharpshooter ? 75 : 100),
@@ -1856,8 +2068,8 @@ export class GettysburgEngine {
     const raycaster = new THREE.Raycaster();
     const rayOrigin = this.playerPos.clone();
     
-    // Accuracy spread calculation
-    let spread = (1 - wData.accuracy) * (this.isAimingADS ? 0.25 : 1.0);
+    // Accuracy spread — tight in ADS where the sights do the talking
+    let spread = (1 - wData.accuracy) * (this.isAimingADS ? 0.12 : 0.55);
     if (this.playerClass === 'SHARPSHOOTER') {
       spread *= 0.5; // Precision perk
     }
@@ -2118,6 +2330,7 @@ export class GettysburgEngine {
 
     this.isReloading = true;
     this.reloadProgress = 0;
+    this.isAimingADS = false; // drill is performed from the hip
     audio.playReloadStage('POWDER');
 
     const isAuthentic = this.historicalSettings.weaponBehavior === 'AUTHENTIC';
@@ -2352,8 +2565,36 @@ export class GettysburgEngine {
     this.playerPos.x = Math.max(-150, Math.min(150, this.playerPos.x));
     this.playerPos.z = Math.max(-150, Math.min(150, this.playerPos.z));
 
-    const targetEyeY = this.isCrouching ? 1.0 : 1.7;
-    this.playerPos.y += (targetEyeY - this.playerPos.y) * 10 * dt;
+    // Trunk & boulder collision — slide around, never through
+    for (const c of this.treeColliders) {
+      const dx = this.playerPos.x - c.x;
+      const dz = this.playerPos.z - c.z;
+      const rr = c.r + 0.45;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < rr * rr && d2 > 1e-6) {
+        const d = Math.sqrt(d2);
+        this.playerPos.x = c.x + (dx / d) * rr;
+        this.playerPos.z = c.z + (dz / d) * rr;
+      }
+    }
+
+    // Terrain grounding + jump physics — boots stay on Gettysburg soil
+    const groundY = this.getTerrainHeight(this.playerPos.x, this.playerPos.z);
+    if (this.jumpQueued) {
+      if (this.isGrounded && !this.isCrouching) {
+        this.verticalVel = 6.4;
+        this.isGrounded = false;
+      }
+      this.jumpQueued = false;
+    }
+    if (!this.isGrounded) {
+      this.verticalVel -= 21 * dt;
+      this.jumpY += this.verticalVel * dt;
+      if (this.jumpY <= 0) { this.jumpY = 0; this.verticalVel = 0; this.isGrounded = true; }
+    }
+    const eyeTarget = this.isCrouching ? 1.05 : 1.7;
+    this.eyeHeightSm += (eyeTarget - this.eyeHeightSm) * Math.min(1, 12 * dt);
+    this.playerPos.y = groundY + this.eyeHeightSm + this.jumpY;
 
     this.camera.position.copy(this.playerPos).add(this.cameraShakeOffset);
     this.camera.rotation.set(0, 0, 0);
@@ -2375,7 +2616,8 @@ export class GettysburgEngine {
     this.camera.fov += (targetFov - this.camera.fov) * 12 * dt;
     this.camera.updateProjectionMatrix();
 
-    const adsTargetPos = new THREE.Vector3(0.0, -0.16, -0.42);
+    // ADS centers the bore on the eye — iron sights sit exactly at screen center
+    const adsTargetPos = new THREE.Vector3(0.0, -0.05, -0.55);
     const hipTargetPos = new THREE.Vector3(0.24, -0.22, -0.45);
     const targetPos = this.isAimingADS ? adsTargetPos : hipTargetPos;
 
@@ -2383,12 +2625,64 @@ export class GettysburgEngine {
     const bobX = Math.cos(this.bobTimer * 0.5) * (this.isAimingADS ? 0.002 : 0.015) * bobMultiplier;
     const bobY = Math.sin(this.bobTimer) * (this.isAimingADS ? 0.002 : 0.012) * bobMultiplier;
 
-    this.gunPivot.position.set(
-      targetPos.x + bobX,
-      targetPos.y + bobY,
-      targetPos.z + this.recoilOffsetZ
-    );
-    this.gunPivot.rotation.x = this.recoilPitch;
+    // ---- Musket reload drill — staged 3D animation (LOAD → CHARGE → RAM → PRIME → SHOULDER)
+    if (this.isReloading) {
+      const p = this.reloadProgress;
+      const sstep = (a: number, b: number, x: number) => {
+        const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+        return t * t * (3 - 2 * t);
+      };
+      const K = [
+        { p: 0.00, pos: [0.24, -0.22, -0.45], rot: [0, 0, 0] },
+        { p: 0.14, pos: [-0.10, -0.30, -0.38], rot: [-0.55, 0.35, 0.55] },  // LOAD — cant across body
+        { p: 0.38, pos: [-0.12, -0.28, -0.40], rot: [-0.45, 0.30, 0.50] },  // CHARGE — cartridge in
+        { p: 0.62, pos: [-0.12, -0.28, -0.40], rot: [-0.45, 0.30, 0.50] },  // RAM — ramrod strokes
+        { p: 0.80, pos: [-0.04, -0.24, -0.42], rot: [-0.18, 0.10, 0.20] },  // PRIME — cap on, hammer cocks
+        { p: 1.00, pos: [0.24, -0.22, -0.45], rot: [0, 0, 0] },             // SHOULDER
+      ];
+      let ka = K[0], kb = K[K.length - 1];
+      for (let i = 0; i < K.length - 1; i++) {
+        if (p >= K[i].p && p <= K[i + 1].p) { ka = K[i]; kb = K[i + 1]; break; }
+      }
+      const t = sstep(ka.p, kb.p, p);
+      const L = (u: number, v: number) => u + (v - u) * t;
+      this.gunPivot.position.set(
+        L(ka.pos[0], kb.pos[0]) + bobX * 0.4,
+        L(ka.pos[1], kb.pos[1]) + bobY * 0.4,
+        L(ka.pos[2], kb.pos[2]) + this.recoilOffsetZ
+      );
+      this.gunPivot.rotation.set(
+        L(ka.rot[0], kb.rot[0]) + this.recoilPitch,
+        L(ka.rot[1], kb.rot[1]),
+        L(ka.rot[2], kb.rot[2])
+      );
+      // Ramrod drill — draw at 0.30, three ramming strokes, returned by 0.68
+      if (this.ramrodMesh) {
+        const drawT = sstep(0.28, 0.36, p) * (1 - sstep(0.60, 0.68, p));
+        const stroke = (p > 0.38 && p < 0.58)
+          ? (Math.sin((p - 0.38) / 0.20 * Math.PI * 3) * 0.5 + 0.5)
+          : 0;
+        this.ramrodMesh.position.set(
+          0,
+          -0.035 + drawT * 0.10,
+          -0.7 - drawT * 1.05 + stroke * 0.35 * drawT
+        );
+      }
+      // Hammer cocks back during PRIME
+      if (this.hammerMesh) {
+        this.hammerMesh.rotation.x = -0.85 * sstep(0.68, 0.82, p);
+      }
+    } else {
+      this.gunPivot.position.set(
+        targetPos.x + bobX,
+        targetPos.y + bobY,
+        targetPos.z + this.recoilOffsetZ
+      );
+      this.gunPivot.rotation.set(this.recoilPitch, 0, 0);
+      // Drill reset
+      if (this.ramrodMesh) this.ramrodMesh.position.set(0, -0.035, -0.7);
+      if (this.hammerMesh) this.hammerMesh.rotation.x = 0;
+    }
 
     // Bayonet affixing entry slide animation
     if (this.isAffixingBayonet) {
@@ -2398,7 +2692,7 @@ export class GettysburgEngine {
         this.isAffixingBayonet = false;
       }
       if (this.bayonetMesh) {
-        this.bayonetMesh.position.z = -0.95 - (this.bayonetIntroProgress * 0.4);
+        this.bayonetMesh.position.z = -1.12 - (this.bayonetIntroProgress * 0.4);
       }
     }
 
@@ -2729,6 +3023,7 @@ export class GettysburgEngine {
         const moveStep = toPlayer.normalize().multiplyScalar(enemy.moveSpeed * dt);
         enemy.x += moveStep.x;
         enemy.z += moveStep.z;
+        enemy.y = this.getTerrainHeight(enemy.x, enemy.z); // march on the ground, not through it
         mesh.position.set(enemy.x, enemy.y, enemy.z);
 
         const leftLeg = mesh.getObjectByName('leftLeg');
