@@ -24,6 +24,7 @@ export interface GameEngineCallbacks {
   onWaveComplete: (wave: number, totalWaves: number, speedBonus?: number) => void;
   onMissionWon: (stats: any) => void;
   onMissionFailed: () => void;
+  onMissionSuccess?: () => void;
   onAddScorePopup: (popup: ScorePopup) => void;
   onArtilleryChargeChange: (charge: number) => void;
   onCanteenChange: (canteen: number) => void;
@@ -162,7 +163,7 @@ export class GettysburgEngine {
   private enemies: EnemyNPC[] = [];
   private enemyMeshes: Map<string, THREE.Group> = new Map();
   private remotePlayerMeshes: Map<string, THREE.Group> = new Map();
-  private particles: { mesh: THREE.Mesh; vel: THREE.Vector3; life: number; maxLife: number; scaleRate: number }[] = [];
+  private particles: { mesh: THREE.Mesh; vel: THREE.Vector3; life: number; maxLife: number; scaleRate: number; gravityScale?: number }[] = [];
   private flags: { mesh: THREE.Mesh; waveOffset: number }[] = [];
 
   // Visual Bullet Tracers
@@ -2323,6 +2324,65 @@ export class GettysburgEngine {
     }
   }
 
+  private spawnBulletTracer(from: THREE.Vector3, to: THREE.Vector3, isEnemy: boolean) {
+    const geo = new THREE.BufferGeometry().setFromPoints([from.clone(), to.clone()]);
+    const mat = new THREE.LineBasicMaterial({
+      color: isEnemy ? 0xff6a3d : 0xffe9a8,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const line = new THREE.Line(geo, mat);
+    this.scene.add(line);
+    this.bulletTracers.push({ mesh: line, life: 0.09, maxLife: 0.09 });
+  }
+
+  private spawnBloodSplatter(pos: THREE.Vector3) {
+    // A .58 Minie ball makes a grievous wound — arterial spray, mist, and a spreading pool
+    const bloodMat = (op: number) => new THREE.MeshBasicMaterial({
+      color: 0x7a0d0d, transparent: true, opacity: op, depthWrite: false,
+    });
+    // Heavy droplets
+    for (let i = 0; i < 16; i++) {
+      const s = 0.03 + Math.random() * 0.05;
+      const drop = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), bloodMat(1));
+      drop.position.copy(pos).add(new THREE.Vector3(
+        (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3
+      ));
+      this.scene.add(drop);
+      const out = new THREE.Vector3(
+        (Math.random() - 0.5), Math.random() * 0.9 + 0.15, (Math.random() - 0.5)
+      ).normalize().multiplyScalar(1.5 + Math.random() * 3.5);
+      this.particles.push({ mesh: drop, vel: out, life: 0.7 + Math.random() * 0.5, maxLife: 1.2, scaleRate: 0.02 });
+    }
+    // Fine mist
+    for (let i = 0; i < 7; i++) {
+      const mist = new THREE.Mesh(new THREE.SphereGeometry(0.09 + Math.random() * 0.08, 6, 5), bloodMat(0.55));
+      mist.position.copy(pos);
+      this.scene.add(mist);
+      this.particles.push({
+        mesh: mist,
+        vel: new THREE.Vector3((Math.random() - 0.5) * 1.6, Math.random() * 1.2 + 0.3, (Math.random() - 0.5) * 1.6),
+        life: 0.45 + Math.random() * 0.25, maxLife: 0.7, scaleRate: 1.6,
+      });
+    }
+    // Ground pool — spreads slowly, lingers, then soaks away
+    const pool = new THREE.Mesh(
+      new THREE.CircleGeometry(0.35 + Math.random() * 0.25, 12),
+      new THREE.MeshBasicMaterial({ color: 0x5c0909, transparent: true, opacity: 0.85, depthWrite: false })
+    );
+    pool.rotation.x = -Math.PI / 2;
+    pool.rotation.z = Math.random() * Math.PI * 2;
+    pool.position.set(
+      pos.x + (Math.random() - 0.5) * 0.6,
+      this.getTerrainHeight(pos.x, pos.z) + 0.03,
+      pos.z + (Math.random() - 0.5) * 0.6
+    );
+    this.scene.add(pool);
+    this.particles.push({ mesh: pool, vel: new THREE.Vector3(0, 0, 0), life: 22, maxLife: 22, scaleRate: 0.03, gravityScale: 0 });
+  }
+
   public startReload() {
     if (this.isReloading || this.reserveAmmo <= 0) return;
     const wData = HISTORICAL_WEAPONS[this.currentWeaponKey] || HISTORICAL_WEAPONS['springfield_1861'];
@@ -2815,10 +2875,10 @@ export class GettysburgEngine {
 
       if (this.unionTickets <= 0) {
         if (this.playerFaction === 'NORTH') this.callbacks.onMissionFailed();
-        else this.callbacks.onMissionSuccess();
+        else this.callbacks.onMissionSuccess?.();
       } else if (this.confedTickets <= 0) {
         if (this.playerFaction === 'SOUTH') this.callbacks.onMissionFailed();
-        else this.callbacks.onMissionSuccess();
+        else this.callbacks.onMissionSuccess?.();
       }
     }
   }
@@ -3082,7 +3142,7 @@ export class GettysburgEngine {
       }
 
       p.mesh.position.addScaledVector(p.vel, dt);
-      p.vel.y -= 3.5 * dt;
+      p.vel.y -= 3.5 * (p.gravityScale ?? 1) * dt;
       p.mesh.scale.addScalar(p.scaleRate * dt);
       if (p.mesh.material instanceof THREE.Material && 'opacity' in p.mesh.material) {
         (p.mesh.material as any).opacity = p.life / p.maxLife;
