@@ -75,6 +75,25 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       id="title-screen-container"
       className="relative w-full min-h-full bg-[#0a0806] text-stone-100 flex flex-col justify-between p-3 sm:p-6 md:p-8 z-10 pb-20 touch-auto"
     >
+      <style>{`
+        @keyframes marquee-chase {
+          0%, 100% { opacity: 1; box-shadow: 0 0 8px 2px currentColor; }
+          50% { opacity: 0.25; box-shadow: none; }
+        }
+        @keyframes arcade-blink {
+          0%, 55% { opacity: 1; }
+          56%, 100% { opacity: 0.12; }
+        }
+        @keyframes neon-flicker {
+          0%, 100% { opacity: 1; }
+          3% { opacity: 0.6; } 5% { opacity: 1; }
+          42% { opacity: 1; } 44% { opacity: 0.5; } 46% { opacity: 1; }
+          71% { opacity: 0.85; } 73% { opacity: 1; }
+        }
+        .marquee-bulb { animation: marquee-chase 1.1s infinite; }
+        .arcade-blink { animation: arcade-blink 1.2s steps(1) infinite; }
+        .neon-title { animation: neon-flicker 4.5s infinite; }
+      `}</style>
       {/* Ambient Backdrop */}
       <div
         className="fixed inset-0 opacity-40 pointer-events-none"
@@ -82,18 +101,49 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       />
       <div className="fixed inset-0 opacity-20 pointer-events-none bg-immersive-dots" />
 
-      {/* Header Banner */}
-      <header id="title-header" className="relative z-10 text-center max-w-4xl mx-auto pt-2 pb-2 px-2">
-        <p className="text-[#d4af37] tracking-[0.3em] sm:tracking-[0.4em] text-[10px] sm:text-xs font-sans uppercase mb-1 drop-shadow-md">
-          Arcade Civil War First-Person Combat &bull; July 1–3, 1863
-        </p>
-        
-        <h1 className="text-4xl sm:text-6xl md:text-7xl lg:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-[#f4ecd8] via-[#8b7355] to-[#3d2b1f] italic tracking-tight leading-none border-b-2 sm:border-b-4 border-[#d4af37]/30 pb-2 sm:pb-3 font-vintage drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)]">
-          GETTYSBURG
-        </h1>
-        <p className="text-[#8b7355] text-xs sm:text-sm md:text-base italic mt-1 sm:mt-2">
-          High Water Mark of the Rebellion &bull; Run &amp; Gun FPS
-        </p>
+      {/* ARCADE MARQUEE HEADER */}
+      <header id="title-header" className="relative z-10 max-w-4xl mx-auto w-full px-1 pt-1">
+        <div className="relative bg-black/90 border-4 border-[#d4af37] rounded-lg px-3 py-4 sm:py-6 text-center overflow-hidden shadow-[0_0_40px_rgba(212,175,55,0.35),inset_0_0_60px_rgba(0,0,0,0.9)]">
+          {/* Chasing marquee bulbs — top row */}
+          <div className="absolute top-1.5 left-3 right-3 flex justify-between pointer-events-none" aria-hidden>
+            {Array.from({ length: 18 }).map((_, i) => (
+              <span
+                key={`top-${i}`}
+                className="marquee-bulb w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-[#ffe9a8] text-[#ffd75e]"
+                style={{ animationDelay: `${(i % 2) * 0.55}s` }}
+              />
+            ))}
+          </div>
+          {/* Chasing marquee bulbs — bottom row */}
+          <div className="absolute bottom-1.5 left-3 right-3 flex justify-between pointer-events-none" aria-hidden>
+            {Array.from({ length: 18 }).map((_, i) => (
+              <span
+                key={`bot-${i}`}
+                className="marquee-bulb w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-[#ffe9a8] text-[#ffd75e]"
+                style={{ animationDelay: `${((i + 1) % 2) * 0.55}s` }}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center justify-between text-[#d4af37] font-arcade text-[8px] sm:text-[10px] px-1 mb-2">
+            <span>1UP</span>
+            <span className="tracking-widest">INSERT COIN</span>
+            <span>HIGH SCORE</span>
+          </div>
+
+          <p className="font-arcade text-[#ff5d5d] text-[9px] sm:text-xs tracking-[0.25em] mb-2 sm:mb-3 drop-shadow-[0_0_8px_rgba(255,93,93,0.8)]">
+            ★ CIVIL WAR ARCADE COMBAT ★
+          </p>
+          <h1 className="neon-title font-arcade text-3xl sm:text-5xl md:text-6xl text-[#ffe9a8] leading-tight drop-shadow-[0_0_18px_rgba(255,215,94,0.9)]">
+            GETTYSBURG
+          </h1>
+          <p className="font-arcade text-[#7ba4db] text-[8px] sm:text-[10px] tracking-[0.2em] mt-2 sm:mt-3 drop-shadow-[0_0_8px_rgba(123,164,219,0.8)]">
+            JULY 1-3, 1863
+          </p>
+          <p className="arcade-blink font-arcade text-white text-[10px] sm:text-sm mt-3 sm:mt-4 tracking-widest">
+            ▸ PRESS SPACE TO START ◂
+          </p>
+        </div>
       </header>
 
       {/* Navigation Tabs Bar */}
@@ -171,99 +221,104 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         {/* Left Column: Faction & Class Selector */}
         <section id="faction-class-selection" className="lg:col-span-5 bg-[#0a0806]/90 backdrop-blur-md border-2 border-[#3d2b1f] rounded-xl p-4 sm:p-5 shadow-2xl flex flex-col gap-4">
           
-          {/* Faction Enlistment */}
+          {/* Faction Enlistment — ARCADE VS PICKER */}
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-xs font-sans tracking-widest text-[#d4af37] flex items-center gap-2 uppercase font-bold">
-                <Shield className="w-4 h-4 text-[#d4af37]" /> 1. Choose Allegiance
-              </h2>
-              <span className="text-[10px] font-mono text-[#8b7355]">
-                {selectedFaction === 'NORTH' ? '★ UNION ARMY' : '⚔ REBEL ARMY'}
-              </span>
+            <h2 className="font-arcade text-center text-[#d4af37] text-xs sm:text-sm tracking-widest mb-3 drop-shadow-[0_0_10px_rgba(212,175,55,0.7)]">
+              ★ CHOOSE YOUR SIDE ★
+            </h2>
+
+            <div className="relative grid grid-cols-2 gap-2 sm:gap-4">
+              {/* UNION — player 1 blue */}
+              <button
+                type="button"
+                id="btn-select-north"
+                onClick={() => handleSelectFaction('NORTH')}
+                className={`relative overflow-hidden rounded-lg border-4 p-3 sm:p-5 text-center transition-all cursor-pointer active:scale-[0.97] min-h-[150px] sm:min-h-[190px] flex flex-col items-center justify-center gap-1.5 ${
+                  selectedFaction === 'NORTH'
+                    ? 'border-[#4da6ff] bg-[#0a1a33] shadow-[0_0_28px_rgba(77,166,255,0.75),inset_0_0_30px_rgba(77,166,255,0.25)]'
+                    : 'border-[#1d3c61] bg-black/70 opacity-60 hover:opacity-90'
+                }`}
+              >
+                <span className="font-arcade text-[8px] sm:text-[10px] text-[#4da6ff] tracking-widest">1P</span>
+                <span className={`font-arcade text-lg sm:text-2xl ${selectedFaction === 'NORTH' ? 'text-white drop-shadow-[0_0_12px_rgba(77,166,255,1)]' : 'text-[#7ba4db]'}`}>
+                  UNION
+                </span>
+                <span className="font-arcade text-[7px] sm:text-[8px] text-[#7ba4db]/80 leading-relaxed">
+                  20TH MAINE
+                  <br />
+                  ARMY OF THE POTOMAC
+                </span>
+                <span className={`font-arcade text-[8px] sm:text-[10px] mt-1 px-3 py-1.5 rounded border-2 ${
+                  selectedFaction === 'NORTH'
+                    ? 'bg-[#4da6ff] text-black border-white arcade-blink'
+                    : 'border-[#4da6ff]/60 text-[#4da6ff]'
+                }`}>
+                  {selectedFaction === 'NORTH' ? '★ READY' : 'SELECT'}
+                </span>
+              </button>
+
+              {/* VS badge */}
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none" aria-hidden>
+                <div className="font-arcade text-sm sm:text-lg text-[#ffe9a8] bg-black border-[3px] border-[#d4af37] rounded-full w-12 h-12 sm:w-16 sm:h-16 flex items-center justify-center shadow-[0_0_20px_rgba(212,175,55,0.8)] -rotate-12">
+                  VS
+                </div>
+              </div>
+
+              {/* CONFEDERATE — player 2 red */}
+              <button
+                type="button"
+                id="btn-select-south"
+                onClick={() => handleSelectFaction('SOUTH')}
+                className={`relative overflow-hidden rounded-lg border-4 p-3 sm:p-5 text-center transition-all cursor-pointer active:scale-[0.97] min-h-[150px] sm:min-h-[190px] flex flex-col items-center justify-center gap-1.5 ${
+                  selectedFaction === 'SOUTH'
+                    ? 'border-[#ff5d5d] bg-[#330a0a] shadow-[0_0_28px_rgba(255,93,93,0.75),inset_0_0_30px_rgba(255,93,93,0.25)]'
+                    : 'border-[#5a2a2a] bg-black/70 opacity-60 hover:opacity-90'
+                }`}
+              >
+                <span className="font-arcade text-[8px] sm:text-[10px] text-[#ff5d5d] tracking-widest">2P</span>
+                <span className={`font-arcade text-lg sm:text-2xl ${selectedFaction === 'SOUTH' ? 'text-white drop-shadow-[0_0_12px_rgba(255,93,93,1)]' : 'text-[#ff8a8a]'}`}>
+                  CSA
+                </span>
+                <span className="font-arcade text-[7px] sm:text-[8px] text-[#ff8a8a]/80 leading-relaxed">
+                  15TH ALABAMA
+                  <br />
+                  ARMY OF N. VIRGINIA
+                </span>
+                <span className={`font-arcade text-[8px] sm:text-[10px] mt-1 px-3 py-1.5 rounded border-2 ${
+                  selectedFaction === 'SOUTH'
+                    ? 'bg-[#ff5d5d] text-black border-white arcade-blink'
+                    : 'border-[#ff5d5d]/60 text-[#ff5d5d]'
+                }`}>
+                  {selectedFaction === 'SOUTH' ? '★ READY' : 'SELECT'}
+                </span>
+              </button>
             </div>
 
-            {/* Quick Segmented Mobile / Desktop Toggle Bar */}
-            <div className="grid grid-cols-2 gap-1.5 bg-[#0a0806] border border-[#3d2b1f] p-1 rounded-lg mb-2.5">
+            {/* Compact toggle (kept for quick switching) */}
+            <div className="grid grid-cols-2 gap-1.5 mt-2">
               <button
                 type="button"
                 id="btn-toggle-north"
                 onClick={() => handleSelectFaction('NORTH')}
-                className={`py-2 px-2 rounded font-sans font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer min-h-[40px] ${
+                className={`py-1.5 rounded font-arcade text-[8px] sm:text-[9px] tracking-widest cursor-pointer border-2 transition-all ${
                   selectedFaction === 'NORTH'
-                    ? 'bg-blue-700 text-white shadow-md border border-blue-400'
-                    : 'text-stone-400 hover:text-white bg-transparent'
+                    ? 'bg-[#4da6ff] text-black border-white'
+                    : 'bg-transparent text-[#7ba4db] border-[#1d3c61] hover:border-[#4da6ff]'
                 }`}
               >
-                ★ UNION (USA)
+                ★ UNION
               </button>
               <button
                 type="button"
                 id="btn-toggle-south"
                 onClick={() => handleSelectFaction('SOUTH')}
-                className={`py-2 px-2 rounded font-sans font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer min-h-[40px] ${
+                className={`py-1.5 rounded font-arcade text-[8px] sm:text-[9px] tracking-widest cursor-pointer border-2 transition-all ${
                   selectedFaction === 'SOUTH'
-                    ? 'bg-zinc-700 text-white shadow-md border border-zinc-400'
-                    : 'text-stone-400 hover:text-white bg-transparent'
+                    ? 'bg-[#ff5d5d] text-black border-white'
+                    : 'bg-transparent text-[#ff8a8a] border-[#5a2a2a] hover:border-[#ff5d5d]'
                 }`}
               >
-                ⚔ CONFEDERATE (CSA)
-              </button>
-            </div>
-            
-            {/* Detailed Regiment Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* Union Faction Card */}
-              <button
-                type="button"
-                id="btn-select-north"
-                onClick={() => handleSelectFaction('NORTH')}
-                className={`group relative text-left min-h-[160px] sm:h-56 border-2 sm:border-4 border-[#1d3c61] bg-[#1d3c61]/15 flex flex-col items-center justify-end p-3 sm:p-4 transition-all hover:bg-[#1d3c61]/35 overflow-hidden cursor-pointer rounded-lg active:scale-[0.98] ${
-                  selectedFaction === 'NORTH' ? 'ring-2 ring-blue-400 bg-[#1d3c61]/35 border-blue-500' : 'opacity-80'
-                }`}
-              >
-                <div className="absolute top-1 left-2 text-[#1d3c61] font-sans font-bold text-5xl sm:text-6xl opacity-30 select-none pointer-events-none">
-                  USA
-                </div>
-                <div className="w-full h-1/2 bg-gradient-to-t from-[#0a0806] via-[#1d3c61]/80 to-transparent absolute bottom-0 left-0 pointer-events-none" />
-                
-                <h3 className="relative z-20 text-lg sm:text-xl font-bold text-white mb-0.5 font-vintage tracking-wider text-center break-words pointer-events-none">
-                  THE UNION
-                </h3>
-                <p className="relative z-20 text-[#7ba4db] text-[9px] sm:text-[10px] uppercase tracking-wider font-sans mb-2 text-center pointer-events-none">
-                  20th Maine • Army of the Potomac
-                </p>
-                <div className={`relative z-20 w-full py-1.5 sm:py-2 text-white text-center text-xs font-bold tracking-tight rounded border pointer-events-none ${
-                  selectedFaction === 'NORTH' ? 'bg-blue-600 border-blue-300 shadow-md' : 'bg-[#1d3c61] border-blue-500/60'
-                }`}>
-                  {selectedFaction === 'NORTH' ? '★ ENLISTED' : 'SELECT UNION'}
-                </div>
-              </button>
-
-              {/* Confederate Faction Card */}
-              <button
-                type="button"
-                id="btn-select-south"
-                onClick={() => handleSelectFaction('SOUTH')}
-                className={`group relative text-left min-h-[160px] sm:h-56 border-2 sm:border-4 border-[#5a5a5a] bg-[#5a5a5a]/15 flex flex-col items-center justify-end p-3 sm:p-4 transition-all hover:bg-[#5a5a5a]/35 overflow-hidden cursor-pointer rounded-lg active:scale-[0.98] ${
-                  selectedFaction === 'SOUTH' ? 'ring-2 ring-zinc-300 bg-[#5a5a5a]/35 border-zinc-400' : 'opacity-80'
-                }`}
-              >
-                <div className="absolute top-1 left-2 text-[#5a5a5a] font-sans font-bold text-5xl sm:text-6xl opacity-30 select-none pointer-events-none">
-                  CSA
-                </div>
-                <div className="w-full h-1/2 bg-gradient-to-t from-[#0a0806] via-[#5a5a5a]/80 to-transparent absolute bottom-0 left-0 pointer-events-none" />
-                
-                <h3 className="relative z-20 text-lg sm:text-xl font-bold text-white mb-0.5 font-vintage tracking-wider text-center break-words pointer-events-none">
-                  CONFEDERACY
-                </h3>
-                <p className="relative z-20 text-[#a0a0a0] text-[9px] sm:text-[10px] uppercase tracking-wider font-sans mb-2 text-center pointer-events-none">
-                  15th Alabama • Army of N. Virginia
-                </p>
-                <div className={`relative z-20 w-full py-1.5 sm:py-2 text-white text-center text-xs font-bold tracking-tight rounded border pointer-events-none ${
-                  selectedFaction === 'SOUTH' ? 'bg-zinc-600 border-zinc-300 shadow-md' : 'bg-[#5a5a5a] border-zinc-500/60'
-                }`}>
-                  {selectedFaction === 'SOUTH' ? '★ ENLISTED' : 'SELECT CONFEDERACY'}
-                </div>
+                ⚔ CSA
               </button>
             </div>
           </div>
