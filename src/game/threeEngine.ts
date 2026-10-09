@@ -480,7 +480,7 @@ export class GettysburgEngine {
     let h = Math.sin(x * 0.021) * 1.1 + Math.cos(z * 0.026) * 0.9 + Math.sin(x * 0.09 + z * 0.06) * 0.35;
     h += 5.5 * gauss(20, -10, 17, 95);    // Cemetery Ridge — Union main line
     h += 4.5 * gauss(-58, 0, 15, 90);     // Seminary Ridge — Confederate line
-    h += 7.0 * gauss(-2, -78, 24, 26);    // Cemetery Hill — north anchor
+    h += 7.0 * gauss(18, -78, 24, 26);    // Cemetery Hill — north anchor, crowns the ridge crest
     h += 9.0 * gauss(72, -38, 21, 24);    // Culp's Hill
     h += 13.0 * gauss(62, 96, 17, 19);   // Little Round Top
     h += 19.0 * gauss(82, 128, 22, 24);   // Big Round Top
@@ -622,8 +622,8 @@ export class GettysburgEngine {
       if (Math.abs(wx + 14) < 2.6 && wz > -115 && wz < 115) {
         tmpC.lerp(cDirt, Math.abs(wx + 14) < 1.1 ? 0.9 : 0.55);
       }
-      // The Wheatfield — golden
-      const wf = ((wx - 2) / 17) ** 2 + ((wz - 52) / 14) ** 2;
+      // The Wheatfield — golden (sits SE of the Peach Orchard, north of Devil's Den)
+      const wf = ((wx - 2) / 17) ** 2 + ((wz - 66) / 14) ** 2;
       if (wf < 1) tmpC.lerp(cWheat, 0.85 * (1 - wf));
       // Peach Orchard
       const po = ((wx + 28) / 15) ** 2 + ((wz - 58) / 11) ** 2;
@@ -1262,10 +1262,10 @@ export class GettysburgEngine {
 
     // --- Hedgerow runs: [x1,z1,x2,z2] field-boundary lines ---
     const hedgeRuns: [number, number, number, number][] = [
-      [-16, 37, 20, 40],     // Wheatfield north edge
+      [-16, 50, 20, 54],     // Wheatfield north edge
       [-10, -42, -10, 18],   // Emmitsburg Road east side
       [-42, 67, -14, 70],    // Peach Orchard south edge
-      [8, -78, 34, -72],     // Farm lane south of McPherson Ridge
+      [8, -78, 34, -72],     // Farm lane on Cemetery Hill's south slope
       [44, 30, 52, 58],      // Lane up toward Little Round Top
     ];
     const hedgeSpots: { x: number; z: number; s: number }[] = [];
