@@ -482,12 +482,12 @@ export class GettysburgEngine {
     h += 4.5 * gauss(-58, 0, 15, 90);     // Seminary Ridge — Confederate line
     h += 7.0 * gauss(18, -78, 24, 26);    // Cemetery Hill — north anchor, crowns the ridge crest
     h += 9.0 * gauss(72, -38, 21, 24);    // Culp's Hill
-    h += 13.0 * gauss(62, 96, 17, 19);   // Little Round Top
-    h += 19.0 * gauss(82, 128, 22, 24);   // Big Round Top
-    h += 3.5 * gauss(34, 72, 12, 10);     // Devil's Den knob
-    h += 5.0 * gauss(38, -52, 14, 12);    // Powers Hill
+    h += 13.0 * gauss(14, 96, 17, 19);   // Little Round Top — just west of the Cemetery Ridge crest
+    h += 19.0 * gauss(0, 130, 22, 24);   // Big Round Top — WEST of Little Round Top (was wrongly east)
+    h += 3.5 * gauss(-7, 100, 12, 10);     // Devil's Den — base of LRT's western slope (was wrongly east)
+    h += 5.0 * gauss(92, 52, 14, 12);    // Powers Hill — ESE on the Baltimore Pike (was wrongly NNE)
     h += 3.0 * gauss(-78, -48, 16, 30);   // McPherson Ridge (Day 1)
-    h -= 1.6 * gauss(30, 80, 22, 26);     // Plum Run valley dip
+    h -= 1.6 * gauss(-14, 92, 22, 26);     // Plum Run valley — runs WEST of Devil's Den / LRT
     return h;
   }
 
@@ -616,7 +616,7 @@ export class GettysburgEngine {
       if (h > 8) tmpC.lerp(cRock, Math.min(1, (h - 8) / 9) * 0.65); // rocky hilltops
       if (slope > 0.5) tmpC.lerp(cRock, Math.min(1, (slope - 0.5) * 1.6) * 0.7); // steep = rock
       // Devil's Den rock field
-      const dd = ((wx - 34) / 14) ** 2 + ((wz - 72) / 12) ** 2;
+      const dd = ((wx + 7) / 14) ** 2 + ((wz - 100) / 12) ** 2;
       if (dd < 1) tmpC.lerp(cRock, 0.75 * (1 - dd));
       // Emmitsburg Road — dirt pike running N-S between the ridges
       if (Math.abs(wx + 14) < 2.6 && wz > -115 && wz < 115) {
@@ -1078,7 +1078,7 @@ export class GettysburgEngine {
     }
     for (let i = 0; i < 14; i++) { // Devil's Den — massive jumbled granite
       const a = Math.random() * Math.PI * 2, r = Math.random() * 11;
-      dropBoulder(34 + Math.cos(a) * r, 72 + Math.sin(a) * r * 0.8, 2.5 + Math.random() * 3.5);
+      dropBoulder(-7 + Math.cos(a) * r, 100 + Math.sin(a) * r * 0.8, 2.5 + Math.random() * 3.5);
     }
 
     // 5. Forests — instanced organic stands (see createForests)
@@ -1099,7 +1099,7 @@ export class GettysburgEngine {
 
     // 9. Capture The Flag Waypoints (The Angle, Copse of Trees, Seminary Ridge)
     this.createFlagPole(20, this.getTerrainHeight(20, 6), 6, 'The Angle', 'NORTH', 'flag_angle');
-    this.createFlagPole(14, this.getTerrainHeight(14, 8), 8, 'Copse of Trees', 'NEUTRAL', 'flag_copse');
+    this.createFlagPole(17, this.getTerrainHeight(17, 20), 20, 'Copse of Trees', 'NEUTRAL', 'flag_copse');
     this.createFlagPole(-58, this.getTerrainHeight(-58, 10), 10, 'Seminary Ridge', 'SOUTH', 'flag_seminary');
 
     // 10. Ambient 50/50 Skirmish Lines
@@ -1117,12 +1117,12 @@ export class GettysburgEngine {
     const stands: Stand[] = [
       { cx: -72, cz: -55, rx: 26, rz: 30, d: 0.85, n: 300 },  // Herbst Woods (McPherson Ridge)
       { cx: -38, cz: 78, rx: 20, rz: 24, d: 0.8, n: 280 },    // Rose Woods
-      { cx: 78, cz: 118, rx: 26, rz: 26, d: 0.9, n: 300 },    // Big Round Top woods
-      { cx: 58, cz: 92, rx: 18, rz: 18, d: 0.5, n: 200 },     // Little Round Top (rocky, sparser)
-      { cx: 66, cz: -34, rx: 24, rz: 22, d: 0.85, n: 280 },   // Culp's Hill / Spangler's Spring
+      { cx: 0, cz: 128, rx: 26, rz: 26, d: 0.9, n: 300 },    // Big Round Top woods
+      { cx: 14, cz: 94, rx: 18, rz: 18, d: 0.5, n: 200 },     // Little Round Top (rocky, sparser)
+      { cx: 76, cz: -20, rx: 26, rz: 24, d: 0.85, n: 280 },   // Culp's Hill / Spangler's Spring — due east of the Angle
       { cx: -62, cz: 30, rx: 22, rz: 26, d: 0.75, n: 260 },   // Pitzer Woods
       { cx: 30, cz: -62, rx: 14, rz: 12, d: 0.5, n: 140 },    // Ziegler's Grove
-      { cx: 14, cz: 8, rx: 9, rz: 11, d: 1.0, n: 110 },       // THE COPSE OF TREES (landmark)
+      { cx: 17, cz: 22, rx: 9, rz: 11, d: 1.0, n: 110 },       // THE COPSE OF TREES — at the wall's 90-degree jog
     ];
     const hash = (x: number, z: number) => {
       const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
@@ -1299,8 +1299,8 @@ export class GettysburgEngine {
     // --- Shrubs: scattered, thicker near woodlot edges ---
     const stands = [
       { cx: -72, cz: -55, rx: 30, rz: 34 }, { cx: -38, cz: 78, rx: 24, rz: 28 },
-      { cx: 78, cz: 118, rx: 30, rz: 30 }, { cx: 66, cz: -34, rx: 28, rz: 26 },
-      { cx: -62, cz: 30, rx: 26, rz: 30 }, { cx: 14, cz: 8, rx: 13, rz: 15 },
+      { cx: 0, cz: 128, rx: 30, rz: 30 }, { cx: 76, cz: -20, rx: 28, rz: 26 },
+      { cx: -62, cz: 30, rx: 26, rz: 30 }, { cx: 17, cz: 22, rx: 13, rz: 15 },
     ];
     const shrubCount = 450;
     const shrubs = new THREE.InstancedMesh(bushGeo, bushMat, shrubCount);
