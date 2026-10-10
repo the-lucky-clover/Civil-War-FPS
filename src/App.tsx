@@ -15,6 +15,7 @@ import {
 } from './types/game';
 import { CAMPAIGN_MISSIONS } from './game/campaignData';
 import { GettysburgEngine, VETERAN_RANKS } from './game/threeEngine';
+import { factionMarch, factionAnthem } from './game/bandMelodies';
 import { MultiplayerService } from './services/multiplayerService';
 import { TitleScreen } from './components/TitleScreen';
 import { GameHUD } from './components/GameHUD';
@@ -132,10 +133,18 @@ export default function App() {
     setTicketState({ unionTickets: 500, confedTickets: 500 });
     // Open the cadet mission briefing with objectives & win conditions!
     setShowBriefingModal(true);
+    // The regimental band plays while the troops form up
+    try {
+      audio.init();
+      audio.playBandTune(factionMarch(chosenFaction).id, { volume: 0.9 });
+    } catch (e) {
+      console.warn('Band march error:', e);
+    }
   };
 
   // Commence battle from briefing modal with dramatic cinematic fade-to-black
   const handleCommenceBattle = () => {
+    audio.stopBandMusic();
     setScreenTransitionFade(true);
     setTimeout(() => {
       setShowBriefingModal(false);
@@ -256,6 +265,15 @@ export default function App() {
           },
           onWaveComplete: (w, tw, speedBonus) => {
             setWave(w + 1);
+            // Between waves: the battle of the bands (Stones River style),
+            // not every lull — roughly every other one, and never twice in a row
+            if (w < tw && !audio.isBandPlaying && Math.random() < 0.5) {
+              try {
+                audio.startBandDuel();
+              } catch (e) {
+                console.warn('Band duel error:', e);
+              }
+            }
             addScorePopup({
               id: `wave_${Date.now()}`,
               text: speedBonus ? `★ WAVE ${w} REPULSED! (+${speedBonus} SWIFT SPEED BONUS) ★` : `★ WAVE ${w} REPULSED! ★`,
@@ -269,9 +287,19 @@ export default function App() {
           },
           onMissionWon: (stats) => {
             setGameMode('VICTORY');
+            try {
+              audio.playBandTune(factionAnthem(faction).id, { volume: 0.9 });
+            } catch (e) {
+              console.warn('Victory anthem error:', e);
+            }
           },
           onMissionFailed: () => {
             setGameMode('DEFEAT');
+            try {
+              audio.playTaps();
+            } catch (e) {
+              console.warn('Taps error:', e);
+            }
           },
           onAddScorePopup: (popup) => {
             addScorePopup(popup);
@@ -364,6 +392,7 @@ export default function App() {
   };
 
   const handleRestart = () => {
+    audio.stopBandMusic();
     setScreenTransitionFade(true);
     setTimeout(() => {
       setIsPaused(false);
@@ -381,6 +410,7 @@ export default function App() {
   };
 
   const handleQuitToTitle = () => {
+    audio.stopBandMusic();
     setScreenTransitionFade(true);
     setTimeout(() => {
       setIsPaused(false);

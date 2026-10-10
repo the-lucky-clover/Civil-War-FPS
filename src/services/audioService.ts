@@ -1,3 +1,5 @@
+import { BAND_TUNES } from '../game/bandMelodies';
+
 class AudioService {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -1036,6 +1038,360 @@ class AudioService {
     this.init();
     if (!this.ctx || !this.sfxGain) return;
     this.playBugleCall('rally');
+  }
+
+  // ------------------------------------------------------------------
+  // Regimental Band — period brass-band engine.
+  // Cornet lead (+ octave-doubled tenor horn), tuba oom-pah on the
+  // tune's chord changes, snare + bass drum. Melodies live in
+  // ../game/bandMelodies.ts, verified against period sources.
+  // ------------------------------------------------------------------
+  private bandBuses: GainNode[] = [];
+  private bandTimers: number[] = [];
+  private bandPlaying = false;
+  private noiseBuf: AudioBuffer | null = null;
+
+  public get isBandPlaying(): boolean {
+    return this.bandPlaying;
+  }
+
+  private noteToFreq(name: string): number {
+    const m = /^([A-G])([#b]?)(-?\d)$/.exec(name);
+    if (!m) return 440;
+    const base: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+    const semi = base[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+    const midi = (parseInt(m[3], 10) + 1) * 12 + semi;
+    return 440 * Math.pow(2, (midi - 69) / 12);
+  }
+
+  private chordRootMidi(chord: string): number {
+    const base: Record<string, number> = { C: 36, D: 38, E: 40, F: 41, G: 43, A: 45, B: 47 };
+    const m = /^([A-G])([#b]?)/.exec(chord);
+    if (!m) return 36;
+    return base[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+  }
+
+  private midiToFreq(midi: number): number {
+    return 440 * Math.pow(2, (midi - 69) / 12);
+  }
+
+  /** Cornet: sawtooth through a lowpass with delayed vibrato. */
+  private scheduleCornet(freq: number, t: number, dur: number, pan: number, vol: number, bright: number, bus: GainNode): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(freq, t);
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 5.2;
+    const lfoG = ctx.createGain();
+    lfoG.gain.setValueAtTime(0, t);
+    lfoG.gain.linearRampToValueAtTime(freq * 0.007, t + Math.min(0.3, dur * 0.5));
+    lfo.connect(lfoG);
+    lfoG.connect(osc.frequency);
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = bright;
+    filt.Q.value = 0.7;
+    const g = ctx.createGain();
+    const atk = Math.min(0.035, dur * 0.25);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + atk);
+    g.gain.setValueAtTime(vol, t + Math.max(atk, dur - 0.05));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.03);
+    const p = ctx.createStereoPanner();
+    p.pan.value = pan;
+    osc.connect(filt);
+    filt.connect(g);
+    g.connect(p);
+    p.connect(bus);
+    osc.start(t);
+    lfo.start(t);
+    const end = t + dur + 0.08;
+    osc.stop(end);
+    lfo.stop(end);
+  }
+
+  /** Tuba: soft triangle, lowpassed. */
+  private scheduleTuba(midi: number, t: number, dur: number, pan: number, vol: number, bus: GainNode): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(this.midiToFreq(midi), t);
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = 420;
+    const g = ctx.createGain();
+    const atk = Math.min(0.03, dur * 0.2);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + atk);
+    g.gain.setValueAtTime(vol, t + Math.max(atk, dur - 0.08));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.04);
+    const p = ctx.createStereoPanner();
+    p.pan.value = pan;
+    osc.connect(filt);
+    filt.connect(g);
+    g.connect(p);
+    p.connect(bus);
+    osc.start(t);
+    osc.stop(t + dur + 0.08);
+  }
+
+  private getNoiseBuffer(): AudioBuffer {
+    const ctx = this.ctx!;
+    if (!this.noiseBuf) {
+      const len = Math.floor(ctx.sampleRate * 0.5);
+      this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = this.noiseBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    }
+    return this.noiseBuf;
+  }
+
+  private scheduleSnare(t: number, pan: number, vol: number, bus: GainNode): void {
+    const ctx = this.ctx!;
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoiseBuffer();
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 1900;
+    bp.Q.value = 0.8;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+    const p = ctx.createStereoPanner();
+    p.pan.value = pan;
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(p);
+    p.connect(bus);
+    src.start(t);
+    src.stop(t + 0.2);
+  }
+
+  private scheduleBassDrum(t: number, pan: number, vol: number, bus: GainNode): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(120, t);
+    osc.frequency.exponentialRampToValueAtTime(43, t + 0.16);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    const p = ctx.createStereoPanner();
+    p.pan.value = pan;
+    osc.connect(g);
+    g.connect(p);
+    p.connect(bus);
+    osc.start(t);
+    osc.stop(t + 0.35);
+  }
+
+  /** Solo bugle voice (Taps) with a touch of across-the-valley echo. */
+  private scheduleBugle(freq: number, t: number, dur: number, pan: number, vol: number, bus: GainNode, echo: DelayNode | null): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(freq, t);
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(freq, t);
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = 1600;
+    filt.Q.value = 1.2;
+    const g = ctx.createGain();
+    const atk = Math.min(0.06, dur * 0.15);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + atk);
+    g.gain.setValueAtTime(vol, t + Math.max(atk, dur - 0.15));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.25);
+    const p = ctx.createStereoPanner();
+    p.pan.value = pan;
+    osc.connect(filt);
+    osc2.connect(filt);
+    filt.connect(g);
+    g.connect(p);
+    p.connect(bus);
+    if (echo) {
+      const eg = ctx.createGain();
+      eg.gain.value = 0.35;
+      p.connect(eg);
+      eg.connect(echo);
+    }
+    osc.start(t);
+    osc2.start(t);
+    osc.stop(t + dur + 0.4);
+    osc2.stop(t + dur + 0.4);
+  }
+
+  /**
+   * Render a tune through the band. Returns the end time on the audio clock.
+   * `at` is an absolute audio-clock time for sequencing (duels).
+   */
+  private renderBandTune(
+    tuneId: string,
+    opts: { pan?: number; volume?: number; maxBars?: number; at?: number; soloBugle?: boolean }
+  ): number {
+    const ctx = this.ctx!;
+    const tune = BAND_TUNES[tuneId];
+    if (!tune) return ctx.currentTime;
+    const pan = opts.pan ?? 0;
+    const vol = opts.volume ?? 1;
+    const bus = ctx.createGain();
+    bus.gain.value = 1;
+    bus.connect(this.musicGain!);
+    this.bandBuses.push(bus);
+    const spb = 60 / tune.tempo;
+    const t0 = opts.at != null ? opts.at : ctx.currentTime + 0.08;
+    const maxBeats = opts.maxBars != null ? opts.maxBars * tune.meter : Infinity;
+
+    let echo: DelayNode | null = null;
+    if (opts.soloBugle) {
+      echo = ctx.createDelay(1.0);
+      echo.delayTime.value = 0.42;
+      const fb = ctx.createGain();
+      fb.gain.value = 0.28;
+      const wet = ctx.createGain();
+      wet.gain.value = 0.5;
+      echo.connect(fb);
+      fb.connect(echo);
+      echo.connect(wet);
+      wet.connect(bus);
+    }
+
+    let t = t0;
+    let beatCursor = 0;
+    for (const note of tune.melody) {
+      if (beatCursor >= maxBeats) break;
+      const b = Math.min(note.b, maxBeats - beatCursor);
+      if (b <= 0) break;
+      const dur = b * spb;
+      const f = this.noteToFreq(note.n);
+      if (opts.soloBugle) {
+        this.scheduleBugle(f, t, dur * 0.96, pan, 0.34 * vol, bus, echo);
+      } else {
+        this.scheduleCornet(f, t, dur * 0.92, pan, 0.3 * vol, 2500, bus);
+        this.scheduleCornet(f / 2, t, dur * 0.92, pan, 0.13 * vol, 1500, bus);
+      }
+      t += dur;
+      beatCursor += b;
+    }
+    const endTime = t + 0.5;
+
+    if (!opts.soloBugle && tune.chords.length > 0) {
+      const totalBars = Math.max(1, Math.ceil(Math.min(beatCursor, maxBeats) / tune.meter));
+      const gentle = tune.meter === 3;
+      for (let bar = 0; bar < totalBars; bar++) {
+        const barT = t0 + bar * tune.meter * spb;
+        const chord = tune.chords[bar % tune.chords.length];
+        const root = this.chordRootMidi(chord);
+        if (tune.meter === 2) {
+          this.scheduleTuba(root, barT, spb * 0.85, pan, 0.2 * vol, bus);
+          this.scheduleTuba(root + 7, barT + spb, spb * 0.85, pan, 0.16 * vol, bus);
+          this.scheduleBassDrum(barT, pan, 0.5 * vol, bus);
+          this.scheduleSnare(barT + spb, pan, 0.32 * vol, bus);
+        } else if (tune.meter === 4) {
+          this.scheduleTuba(root, barT, spb * 0.85, pan, 0.2 * vol, bus);
+          this.scheduleTuba(root + 7, barT + spb, spb * 0.85, pan, 0.15 * vol, bus);
+          this.scheduleTuba(root, barT + 2 * spb, spb * 0.85, pan, 0.18 * vol, bus);
+          this.scheduleTuba(root + 7, barT + 3 * spb, spb * 0.85, pan, 0.15 * vol, bus);
+          this.scheduleBassDrum(barT, pan, 0.5 * vol, bus);
+          this.scheduleSnare(barT + spb, pan, 0.34 * vol, bus);
+          this.scheduleBassDrum(barT + 2 * spb, pan, 0.42 * vol, bus);
+          this.scheduleSnare(barT + 3 * spb, pan, 0.34 * vol, bus);
+        } else {
+          this.scheduleTuba(root, barT, spb * 2.0, pan, 0.18 * vol, bus);
+          this.scheduleTuba(root + 7, barT + spb, spb * 0.85, pan, 0.13 * vol, bus);
+          this.scheduleBassDrum(barT, pan, gentle ? 0.3 * vol : 0.45 * vol, bus);
+          if (!gentle) this.scheduleSnare(barT + spb, pan, 0.25 * vol, bus);
+          else this.scheduleSnare(barT + 2 * spb, pan, 0.12 * vol, bus);
+        }
+      }
+    }
+    return endTime;
+  }
+
+  /** Play a full band tune, stopping anything currently playing. */
+  public playBandTune(tuneId: string, opts?: { pan?: number; volume?: number; maxBars?: number }): void {
+    this.init();
+    if (!this.ctx || !this.musicGain) return;
+    this.stopBandMusic();
+    this.bandPlaying = true;
+    const end = this.renderBandTune(tuneId, { ...(opts ?? {}) });
+    const ms = Math.max(0, (end - this.ctx.currentTime) * 1000);
+    this.bandTimers.push(window.setTimeout(() => {
+      this.bandPlaying = false;
+    }, ms + 400));
+  }
+
+  /** Taps — solo bugle for the fallen. */
+  public playTaps(): void {
+    this.init();
+    if (!this.ctx || !this.musicGain) return;
+    this.stopBandMusic();
+    this.bandPlaying = true;
+    const end = this.renderBandTune('taps', { pan: 0, volume: 1, soloBugle: true });
+    const ms = Math.max(0, (end - this.ctx.currentTime) * 1000);
+    this.bandTimers.push(window.setTimeout(() => {
+      this.bandPlaying = false;
+    }, ms + 400));
+  }
+
+  /**
+   * The battle of the bands — Union and Confederate bands alternate tunes
+   * across the lines, each trying to drown the other out, until both join
+   * on "Home, Sweet Home." (Stones River, Dec 30 1862; Fredericksburg;
+   * the Rappahannock, spring 1863.)
+   * Panning follows the Gettysburg field: Union holds Cemetery Ridge
+   * (east/right), Confederates hold Seminary Ridge (west/left).
+   */
+  public startBandDuel(): void {
+    this.init();
+    if (!this.ctx || !this.musicGain || this.bandPlaying) return;
+    this.stopBandMusic();
+    this.bandPlaying = true;
+    const USA_PAN = 0.55;
+    const CSA_PAN = -0.55;
+    let at = this.ctx.currentTime + 0.4;
+    const phraseBars = 4;
+    for (let round = 0; round < 3; round++) {
+      const vol = 0.75 + round * 0.18;
+      at = this.renderBandTune('battleCry', { pan: USA_PAN, volume: vol, maxBars: phraseBars, at });
+      at = this.renderBandTune('dixie', { pan: CSA_PAN, volume: vol, maxBars: phraseBars, at });
+      at += 0.5;
+    }
+    this.renderBandTune('homeSweetHome', { pan: USA_PAN, volume: 0.85, at });
+    const end = this.renderBandTune('homeSweetHome', { pan: CSA_PAN, volume: 0.85, at });
+    const ms = Math.max(0, (end - this.ctx.currentTime) * 1000);
+    this.bandTimers.push(window.setTimeout(() => {
+      this.bandPlaying = false;
+    }, ms + 600));
+  }
+
+  public stopBandMusic(): void {
+    this.bandPlaying = false;
+    for (const t of this.bandTimers) clearTimeout(t);
+    this.bandTimers = [];
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    for (const bus of this.bandBuses) {
+      try {
+        bus.gain.cancelScheduledValues(now);
+        bus.gain.setTargetAtTime(0.0001, now, 0.12);
+        const b = bus;
+        window.setTimeout(() => {
+          try {
+            b.disconnect();
+          } catch {
+            /* already gone */
+          }
+        }, 800);
+      } catch {
+        /* already gone */
+      }
+    }
+    this.bandBuses = [];
   }
 }
 
