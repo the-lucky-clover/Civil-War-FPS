@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Faction, CharacterClass, CampaignMission, HistoricalSettings } from '../types/game';
 import { CAMPAIGN_MISSIONS } from '../game/campaignData';
 import { CHARACTER_CLASSES } from '../game/classesData';
 import { audio } from '../services/audioService';
+import { factionAnthem } from '../game/bandMelodies';
+import { UnionFlag, ConfederateBattleFlag } from './BattleFlags';
 import { HISTORICAL_WEAPONS } from '../game/weapons';
 import { Shield, Crosshair, Award, Volume2, HelpCircle, Swords, Users, Play, Sparkles, BookOpen, Settings, Check, Flame, Heart } from 'lucide-react';
 
@@ -32,10 +34,47 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const [selectedMission, setSelectedMission] = useState<CampaignMission>(CAMPAIGN_MISSIONS[0]);
   const [activeTab, setActiveTab] = useState<'CAMPAIGN' | 'CLASSES' | 'SETTINGS'>('CAMPAIGN');
   const [soundTestKey, setSoundTestKey] = useState<string>('');
+  /** Which faction's march is currently previewing on hover/focus (null = none). */
+  const previewFactionRef = useRef<Faction | null>(null);
+
+  /** Hover/focus: preview the faction's anthem march. Stops when the pointer leaves. */
+  const previewFactionMarch = (faction: Faction) => {
+    if (previewFactionRef.current === faction) return;
+    previewFactionRef.current = faction;
+    try {
+      audio.init();
+      audio.playBandTune(factionAnthem(faction).id, { volume: 0.7, maxBars: 8 });
+    } catch (e) {
+      console.warn('March preview error:', e);
+    }
+  };
+
+  const stopFactionMarchPreview = () => {
+    if (!previewFactionRef.current) return;
+    previewFactionRef.current = null;
+    try {
+      audio.stopBandMusic();
+    } catch (e) {
+      /* noop */
+    }
+  };
+
+  // Never leave a march preview playing after the title screen goes away.
+  useEffect(() => {
+    return () => {
+      previewFactionRef.current = null;
+      try {
+        audio.stopBandMusic();
+      } catch (e) {
+        /* noop */
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && activeTab === 'CAMPAIGN') {
+        stopFactionMarchPreview();
         audio.init();
         audio.playBugleCharge();
         onStartCampaign(selectedFaction, selectedClass, selectedMission);
@@ -48,6 +87,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const handleSelectFaction = (faction: Faction) => {
     setSelectedFaction(faction);
     try {
+      stopFactionMarchPreview();
       audio.init();
       audio.playHuzzahCheer(faction);
     } catch (e) {
@@ -177,7 +217,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         <button
           id="nav-tab-multiplayer"
           type="button"
-          onClick={() => onOpenMultiplayer(selectedFaction, selectedClass)}
+          onClick={() => {
+            stopFactionMarchPreview();
+            onOpenMultiplayer(selectedFaction, selectedClass);
+          }}
           className="cursor-pointer px-2.5 py-1.5 min-h-[40px] transition-all border-b-2 border-transparent hover:text-[#d4af37] hover:border-[#d4af37] flex items-center gap-1"
         >
           MULTIPLAYER
@@ -233,6 +276,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 type="button"
                 id="btn-select-north"
                 onClick={() => handleSelectFaction('NORTH')}
+                onMouseEnter={() => previewFactionMarch('NORTH')}
+                onMouseLeave={stopFactionMarchPreview}
+                onFocus={() => previewFactionMarch('NORTH')}
+                onBlur={stopFactionMarchPreview}
                 className={`relative overflow-hidden rounded-lg border-4 p-3 sm:p-5 text-center transition-all cursor-pointer active:scale-[0.97] min-h-[150px] sm:min-h-[190px] flex flex-col items-center justify-center gap-1.5 ${
                   selectedFaction === 'NORTH'
                     ? 'border-[#4da6ff] bg-[#0a1a33] shadow-[0_0_28px_rgba(77,166,255,0.75),inset_0_0_30px_rgba(77,166,255,0.25)]'
@@ -240,6 +287,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 }`}
               >
                 <span className="font-arcade text-[8px] sm:text-[10px] text-[#4da6ff] tracking-widest">1P</span>
+                <UnionFlag className="w-20 sm:w-28 h-auto rounded-[2px] shadow-[0_2px_10px_rgba(0,0,0,0.6)]" />
                 <span className={`font-arcade text-lg sm:text-2xl ${selectedFaction === 'NORTH' ? 'text-white drop-shadow-[0_0_12px_rgba(77,166,255,1)]' : 'text-[#7ba4db]'}`}>
                   UNION
                 </span>
@@ -247,6 +295,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   20TH MAINE
                   <br />
                   ARMY OF THE POTOMAC
+                </span>
+                <span className="font-arcade text-[7px] sm:text-[8px] text-[#9fc2ef]/70 tracking-widest">
+                  ♪ THE BATTLE CRY OF FREEDOM
                 </span>
                 <span className={`font-arcade text-[8px] sm:text-[10px] mt-1 px-3 py-1.5 rounded border-2 ${
                   selectedFaction === 'NORTH'
@@ -269,6 +320,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 type="button"
                 id="btn-select-south"
                 onClick={() => handleSelectFaction('SOUTH')}
+                onMouseEnter={() => previewFactionMarch('SOUTH')}
+                onMouseLeave={stopFactionMarchPreview}
+                onFocus={() => previewFactionMarch('SOUTH')}
+                onBlur={stopFactionMarchPreview}
                 className={`relative overflow-hidden rounded-lg border-4 p-3 sm:p-5 text-center transition-all cursor-pointer active:scale-[0.97] min-h-[150px] sm:min-h-[190px] flex flex-col items-center justify-center gap-1.5 ${
                   selectedFaction === 'SOUTH'
                     ? 'border-[#ff5d5d] bg-[#330a0a] shadow-[0_0_28px_rgba(255,93,93,0.75),inset_0_0_30px_rgba(255,93,93,0.25)]'
@@ -276,6 +331,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 }`}
               >
                 <span className="font-arcade text-[8px] sm:text-[10px] text-[#ff5d5d] tracking-widest">2P</span>
+                <ConfederateBattleFlag className="w-20 sm:w-28 h-auto rounded-[2px] shadow-[0_2px_10px_rgba(0,0,0,0.6)]" />
                 <span className={`font-arcade text-lg sm:text-2xl ${selectedFaction === 'SOUTH' ? 'text-white drop-shadow-[0_0_12px_rgba(255,93,93,1)]' : 'text-[#ff8a8a]'}`}>
                   CSA
                 </span>
@@ -283,6 +339,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   15TH ALABAMA
                   <br />
                   ARMY OF N. VIRGINIA
+                </span>
+                <span className="font-arcade text-[7px] sm:text-[8px] text-[#ffb3b3]/70 tracking-widest">
+                  ♪ DIXIE
                 </span>
                 <span className={`font-arcade text-[8px] sm:text-[10px] mt-1 px-3 py-1.5 rounded border-2 ${
                   selectedFaction === 'SOUTH'
@@ -452,6 +511,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               <button
                 id="btn-launch-campaign"
                 onClick={() => {
+                  stopFactionMarchPreview();
                   audio.init();
                   audio.playBugleCharge();
                   onStartCampaign(selectedFaction, selectedClass, selectedMission);

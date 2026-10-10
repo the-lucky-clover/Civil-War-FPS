@@ -72,3 +72,14 @@
   background: #8b7355;
 }
 
+
+/* Gentle cloth-wave for the SVG battle flags on the faction select screen */
+@keyframes flagWave {
+  0%, 100% { transform: skewY(0deg) scaleX(1); }
+  25% { transform: skewY(1.1deg) scaleX(0.995); }
+  75% { transform: skewY(-1.1deg) scaleX(0.995); }
+}
+
+.flag-wave {
+  animation: flagWave 3.2s ease-in-out infinite;
+}
