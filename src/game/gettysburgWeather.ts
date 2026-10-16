@@ -1,8 +1,8 @@
 /**
  * Historical weather for the Battle of Gettysburg, July 1–3, 1863.
  *
- * Recorded conditions (per the user's specification):
- *   July 1: Cloudy, gentle southern breeze 12 mph. 72°F at 7AM, 76°F at 2PM, 74°F at 9PM.
+ * Recorded conditions (Rev. Dr. Michael Jacobs, "Meteorology of the Battle"):
+ *   July 1: Cloudy, very gentle southern breeze (2 mph). 72°F at 7AM, 76°F at 2PM, 74°F at 9PM.
  *   July 2: Clouds cleared in the afternoon, same wind. 74°F at 7AM, 81°F at 2PM, 76°F at 9PM.
  *   July 3: Storm rolled through in the afternoon. 73°F at 7AM, 87°F at 2PM, 76°F at 9PM.
  *
@@ -20,7 +20,7 @@ export interface GettysburgKeyframe {
   label: string;
 }
 
-export const WIND_SOUTH_MPH = 12; // gentle southern breeze, all three days
+export const WIND_SOUTH_MPH = 2; // Jacobs' recorded breeze, all three days (July 2 "as on preceding day", July 3 "very gentle" S.S.W.)
 
 const DAY1: GettysburgKeyframe[] = [
   { hour: 5.5, tempF: 70, cloudCover: 0.85, precip: 'none', label: 'Overcast dawn' },

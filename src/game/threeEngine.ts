@@ -118,7 +118,7 @@ export class GettysburgEngine {
   public battleDay: number = 1;
   public battleHour: number = 9.5;
   public tempF: number = 72;
-  public windMph: number = 12;
+  public windMph: number = 2;
   public windVec: THREE.Vector3 = new THREE.Vector3(0, 0, -1); // southerly breeze → drifts north (−z)
   private battleHaze: number = 0; // extra fog density from cannon smoke, set per wave
   private battleTitle: string = '';
@@ -882,7 +882,7 @@ export class GettysburgEngine {
     // each wave picks up the battle clock at the historical hour (plus gunsmoke haze).
     // The night mission keeps its bespoke moonlit look.
     if (this.currentMissionId === 'day1_mcpherson') {
-      // July 1 — overcast all day, gentle 12 mph southerly breeze, 72→76°F
+      // July 1 — overcast all day, very gentle 2 mph southerly breeze (Jacobs), 72→76°F
       if (waveNumber === 1) this.startHistoricalWeather(1, 9.5, 'Morning Mist', 0.004);
       else if (waveNumber === 2) this.startHistoricalWeather(1, 10.5, 'Mid-Morning Skirmish', 0.004);
       else this.startHistoricalWeather(1, 11.5, 'High Noon Skirmish', 0.002);
@@ -3734,8 +3734,8 @@ export class GettysburgEngine {
   }
 
   private updateFlags(dt: number) {
-    // Flags stream on the recorded breeze — 12 mph southerly, gusting in the storm
-    const windFactor = 0.65 + (this.windMph / 12) * 0.45;
+    // Flags hang near-limp on the recorded 2 mph breeze, streaming only when the storm gusts
+    const windFactor = this.windMph / 12;
     this.flags.forEach((f) => {
       f.waveOffset += dt * 4 * windFactor;
       const pos = (f.mesh.geometry as THREE.PlaneGeometry).attributes.position;
