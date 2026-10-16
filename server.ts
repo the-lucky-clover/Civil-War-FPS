@@ -3,49 +3,20 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
-
-interface PlayerData {
-  id: string;
-  name: string;
-  faction: 'NORTH' | 'SOUTH';
-  charClass: 'INFANTRY' | 'SHARPSHOOTER' | 'OFFICER';
-  x: number;
-  y: number;
-  z: number;
-  rotY: number;
-  pitch: number;
-  health: number;
-  maxHealth: number;
-  kills: number;
-  deaths: number;
-  score: number;
-  weapon: string;
-  isFiring: boolean;
-  isReloading: boolean;
-  isRunning: boolean;
-  isMelee: boolean;
-  ping: number;
-  lastSeen: number;
-  isBot?: boolean;
-}
-
-interface Room {
-  id: string;
-  name: string;
-  map: string;
-  mode: 'TDM' | 'FFA' | 'HIGH_WATER_MARK';
-  scores: { NORTH: number; SOUTH: number };
-  maxScore: number;
-  timeRemaining: number;
-  players: Map<string, PlayerData>;
-  sockets: Map<string, WebSocket>;
-  bots: Map<string, PlayerData>;
-}
+import { PlayerData, Room, DamageOpts } from './server/types';
+import { BotManager } from './server/bots';
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 app.use(express.json());
+
+// Allow the desktop client / remote joiners to read the lobby API cross-origin
+app.use('/api', (_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -74,7 +45,7 @@ function getOrCreateRoom(roomId: string, roomName = 'The Angle', map = 'the_angl
       timeRemaining: 600, // 10 mins
       players: new Map(),
       sockets: new Map(),
-      bots: new Map(),
+      botBrains: new Map(),
     };
     rooms.set(roomId, room);
   }
@@ -92,14 +63,19 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/rooms', (req, res) => {
-  const roomList = Array.from(rooms.values()).map(r => ({
-    id: r.id,
-    name: r.name,
-    map: r.map,
-    mode: r.mode,
-    playerCount: r.players.size,
-    scores: r.scores,
-  }));
+  const roomList = Array.from(rooms.values()).map(r => {
+    let bots = 0;
+    r.players.forEach(p => { if (p.isBot) bots++; });
+    return {
+      id: r.id,
+      name: r.name,
+      map: r.map,
+      mode: r.mode,
+      playerCount: r.players.size,
+      botCount: bots,
+      scores: r.scores,
+    };
+  });
   res.json(roomList);
 });
 
@@ -121,6 +97,67 @@ app.post('/api/leaderboard', (req, res) => {
   }
   res.json(arcadeLeaderboard);
 });
+
+/**
+ * Apply damage from attacker to victim, broadcast the damage event, and
+ * handle kills + respawns. Shared by player hit reports, AI bots, and
+ * cannon strikes so every casualty flows through one honest path.
+ */
+function dealDamage(room: Room, attackerId: string, targetId: string, opts: DamageOpts) {
+  const attacker = room.players.get(attackerId);
+  const victim = room.players.get(targetId);
+  if (!attacker || !victim || victim.health <= 0) return;
+
+  const damage = Math.min(400, Math.max(10, Math.round(opts.damage || 45)));
+  victim.health = Math.max(0, victim.health - damage);
+
+  const isKill = victim.health <= 0;
+  if (isKill) {
+    victim.deaths += 1;
+    attacker.kills += 1;
+    attacker.score += opts.isHeadshot ? 150 : 100;
+    if (opts.isMelee) attacker.score += 75;
+
+    if (attacker.faction === 'NORTH') room.scores.NORTH += 1;
+    else room.scores.SOUTH += 1;
+  }
+
+  broadcastToRoom(room, {
+    type: 'damage_event',
+    victimId: victim.id,
+    attackerId: attacker.id,
+    damage,
+    remainingHealth: victim.health,
+    isHeadshot: !!opts.isHeadshot,
+    isMelee: !!opts.isMelee,
+    isKill,
+    weapon: opts.weapon || 'musket',
+    scores: room.scores,
+  });
+
+  // Human respawn on a timer; bot respawn is driven by the BotManager brain.
+  if (isKill && !victim.isBot) {
+    setTimeout(() => {
+      if (room.players.has(victim.id)) {
+        victim.health = victim.maxHealth;
+        victim.x = victim.faction === 'NORTH' ? (Math.random() * 20 - 10) : (Math.random() * 20 - 10);
+        victim.z = victim.faction === 'NORTH' ? -(40 + Math.random() * 15) : (40 + Math.random() * 15);
+        broadcastToRoom(room, {
+          type: 'player_respawned',
+          playerId: victim.id,
+          x: victim.x,
+          y: victim.y,
+          z: victim.z,
+          health: victim.health,
+        });
+      }
+    }, 3000);
+  }
+}
+
+// AI soldiers fill every room so the field is alive even solo.
+const botManager = new BotManager(rooms, broadcastToRoom, dealDamage, Number(process.env.BOTS_PER_SIDE || 3));
+botManager.start();
 
 // WebSocket Handling
 wss.on('connection', (ws: WebSocket) => {
@@ -164,6 +201,7 @@ wss.on('connection', (ws: WebSocket) => {
             isMelee: false,
             ping: 0,
             lastSeen: Date.now(),
+            regiment: typeof data.regiment === 'string' ? data.regiment.slice(0, 40) : undefined,
           };
 
           room.players.set(currentPlayerId, player);
@@ -246,55 +284,12 @@ wss.on('connection', (ws: WebSocket) => {
           if (!currentRoomId || !currentPlayerId) return;
           const room = rooms.get(currentRoomId);
           if (!room) return;
-          const attacker = room.players.get(currentPlayerId);
-          const victim = room.players.get(data.targetId);
-          if (!attacker || !victim) return;
-
-          const damage = Math.min(100, Math.max(10, data.damage || 45));
-          victim.health = Math.max(0, victim.health - damage);
-
-          const isKill = victim.health <= 0;
-          if (isKill) {
-            victim.deaths += 1;
-            attacker.kills += 1;
-            attacker.score += data.isHeadshot ? 150 : 100;
-            if (data.isMelee) attacker.score += 75;
-
-            if (attacker.faction === 'NORTH') room.scores.NORTH += 1;
-            else room.scores.SOUTH += 1;
-          }
-
-          broadcastToRoom(room, {
-            type: 'damage_event',
-            victimId: victim.id,
-            attackerId: attacker.id,
-            damage,
-            remainingHealth: victim.health,
+          dealDamage(room, currentPlayerId, data.targetId, {
+            damage: data.damage || 45,
             isHeadshot: !!data.isHeadshot,
             isMelee: !!data.isMelee,
-            isKill,
             weapon: data.weapon || 'musket',
-            scores: room.scores,
           });
-
-          // If kill, handle respawn
-          if (isKill) {
-            setTimeout(() => {
-              if (room.players.has(victim.id)) {
-                victim.health = victim.maxHealth;
-                victim.x = victim.faction === 'NORTH' ? (Math.random() * 20 - 10) : (Math.random() * 20 - 10);
-                victim.z = victim.faction === 'NORTH' ? -(40 + Math.random() * 15) : (40 + Math.random() * 15);
-                broadcastToRoom(room, {
-                  type: 'player_respawned',
-                  playerId: victim.id,
-                  x: victim.x,
-                  y: victim.y,
-                  z: victim.z,
-                  health: victim.health,
-                });
-              }
-            }, 3000);
-          }
           break;
         }
 
@@ -328,6 +323,8 @@ wss.on('connection', (ws: WebSocket) => {
             direction: data.direction,
             rotY: data.rotY,
             pitch: data.pitch,
+            ammo: data.ammo || 'CANISTER',
+            impactPos: data.impactPos,
           }, currentPlayerId);
           break;
         }
@@ -351,6 +348,14 @@ wss.on('connection', (ws: WebSocket) => {
 
         case 'ping': {
           ws.send(JSON.stringify({ type: 'pong', time: Date.now() }));
+          break;
+        }
+
+        case 'bot_config': {
+          // Host control: tune the standing AI force (0 = no AI soldiers)
+          const n = Math.max(0, Math.min(8, Number(data.botsPerSide ?? 3)));
+          botManager.setBotsPerSide(n);
+          ws.send(JSON.stringify({ type: 'bot_config_ack', botsPerSide: botManager.getBotsPerSide() }));
           break;
         }
       }
@@ -396,6 +401,8 @@ setInterval(() => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    // Dev only — vite stays a devDependency and never ships in the .dmg
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

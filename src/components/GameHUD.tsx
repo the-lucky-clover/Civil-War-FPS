@@ -15,6 +15,13 @@ import { HISTORICAL_WEAPONS } from '../game/weapons';
 import { CHARACTER_CLASSES } from '../game/classesData';
 import { Minimap } from './Minimap';
 import {
+  DrillState,
+  DRILL_STATIONS,
+  stationDef,
+  CANNON_AMMO,
+  AMMO_ORDER,
+} from '../game/cannonDrill';
+import {
   Shield,
   Crosshair,
   Zap,
@@ -69,6 +76,7 @@ interface GameHUDProps {
   lastStandState?: { active: boolean; remaining: number };
   interactivePrompt?: InteractivePrompt | null;
   cannonState?: { isMounted: boolean; reloadProgress: number };
+  cannonDrill?: DrillState | null;
   ticketState?: TicketState;
   minimapEntities?: MinimapEntity[];
   flagWaypoints?: FlagWaypoint[];
@@ -122,6 +130,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   lastStandState,
   interactivePrompt,
   cannonState,
+  cannonDrill,
   ticketState,
   minimapEntities,
   flagWaypoints,
@@ -307,24 +316,72 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <div className="absolute bottom-8 w-6 h-[1px] bg-[#d4af37]" />
           </div>
 
-          <div className="mt-6 flex flex-col items-center gap-1 bg-[#0a0806]/95 border-2 border-[#d4af37] px-5 py-2.5 rounded-lg shadow-2xl">
+          <div className="mt-6 flex flex-col items-center gap-1.5 bg-[#0a0806]/95 border-2 border-[#d4af37] px-5 py-2.5 rounded-lg shadow-2xl max-w-[92vw]">
             <div className="text-xs sm:text-sm font-vintage font-black text-[#d4af37] tracking-wider uppercase flex items-center gap-2">
               <Flame className="w-4 h-4 text-amber-400" />
-              12-POUNDER NAPOLEON ARTILLERY BATTERY
+              12-POUNDER NAPOLEON — GUN DRILL
             </div>
-            <div className="text-[11px] font-mono text-[#f4ecd8]">
-              {cannonState.reloadProgress >= 1 ? (
-                <span className="text-emerald-400 font-bold tracking-widest animate-pulse">
-                  ★ CANISTER SHOT ARMED & READY ★
-                </span>
-              ) : (
-                <span className="text-amber-400">
-                  RELOADING CANISTER: {Math.round(cannonState.reloadProgress * 100)}%
-                </span>
-              )}
-            </div>
+            {cannonDrill && (() => {
+              const def = stationDef(cannonDrill.station);
+              const order = DRILL_STATIONS.map((s) => s.id);
+              const idx = order.indexOf(cannonDrill.station);
+              return (
+                <>
+                  {/* Drill stations strip */}
+                  <div className="flex items-center gap-1 flex-wrap justify-center">
+                    {DRILL_STATIONS.map((s, i) => (
+                      <span
+                        key={s.id}
+                        className={`text-[8px] sm:text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                          i < idx
+                            ? 'border-emerald-600 text-emerald-400 bg-emerald-950/40'
+                            : i === idx
+                              ? 'border-[#d4af37] text-black bg-[#d4af37] font-black animate-pulse'
+                              : 'border-[#3d2b1f] text-[#8b7355] bg-black/40'
+                        }`}
+                      >
+                        {i < idx ? '✓ ' : ''}{s.id}
+                      </span>
+                    ))}
+                  </div>
+                  {/* Current order */}
+                  <div className="text-center">
+                    <div className="text-[10px] font-mono text-[#8b7355]">{def.crewRole}</div>
+                    <div className="text-sm sm:text-base font-vintage font-black text-[#f4ecd8] tracking-widest">
+                      “{def.order}”
+                    </div>
+                    {def.duration > 0 && cannonDrill.progress > 0 && cannonDrill.progress < 1 && (
+                      <div className="w-48 h-1.5 bg-stone-900 rounded-full overflow-hidden border border-[#d4af37]/50 mt-1 mx-auto">
+                        <div className="h-full bg-[#d4af37] transition-all duration-100" style={{ width: `${Math.round(cannonDrill.progress * 100)}%` }} />
+                      </div>
+                    )}
+                    {cannonDrill.station === 'AIM' && (
+                      <div className="text-[10px] font-mono text-sky-300 mt-0.5">MOUSE: traverse &amp; elevate — CLICK when laid</div>
+                    )}
+                    {cannonDrill.station === 'FIRE' && (
+                      <div className="text-[11px] font-mono text-red-400 font-black mt-0.5 animate-pulse">CLICK TO PULL THE LANYARD</div>
+                    )}
+                  </div>
+                  {/* Ammunition natures */}
+                  <div className="flex items-center gap-1.5">
+                    {AMMO_ORDER.map((a, i) => (
+                      <span
+                        key={a}
+                        className={`text-[9px] font-mono px-2 py-0.5 rounded border ${
+                          cannonDrill.ammo === a
+                            ? 'border-[#d4af37] text-black bg-[#d4af37] font-black'
+                            : 'border-[#3d2b1f] text-[#8b7355]'
+                        }`}
+                      >
+                        [{i + 1}] {CANNON_AMMO[a].short}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
             <div className="text-[9px] font-mono text-[#8b7355] mt-0.5">
-              [LEFT CLICK] FIRE CANISTER &bull; [E] DISMOUNT CANNON
+              [CLICK] WORK THE DRILL &bull; [1/2/3] SHOT / SHELL / CANISTER &bull; [E] DISMOUNT
             </div>
           </div>
         </div>

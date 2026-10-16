@@ -6,7 +6,7 @@ import { audio } from '../services/audioService';
 interface MultiplayerLobbyProps {
   faction: Faction;
   charClass: CharacterClass;
-  onJoinRoom: (roomId: string, roomName: string, map: string, mode: 'TDM' | 'FFA') => void;
+  onJoinRoom: (roomId: string, roomName: string, map: string, mode: 'TDM' | 'FFA', serverUrl?: string) => void;
   onBack: () => void;
 }
 
@@ -28,16 +28,22 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
     { name: 'Gen. Armistead', faction: 'SOUTH', text: 'Give them the cold steel, boys! Forward!' },
   ]);
   const [chatInput, setChatInput] = useState('');
+  /** "host:port" of a friend's hosted game — blank means this server. */
+  const [remoteServer, setRemoteServer] = useState('');
 
   useEffect(() => {
     fetchRooms();
     const interval = setInterval(fetchRooms, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [remoteServer]);
+
+  const apiBase = remoteServer.trim()
+    ? `http://${remoteServer.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')}`
+    : '';
 
   const fetchRooms = async () => {
     try {
-      const res = await fetch('/api/rooms');
+      const res = await fetch(`${apiBase}/api/rooms`);
       if (res.ok) {
         const data = await res.json();
         setRooms(data);
@@ -53,7 +59,13 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
     const rId = `room_${Date.now()}`;
     audio.init();
     audio.playBugleCharge();
-    onJoinRoom(rId, rName, selectedMap, selectedMode);
+    onJoinRoom(rId, rName, selectedMap, selectedMode, remoteServer.trim() || undefined);
+  };
+
+  const handleJoinRemoteRoom = (room: any) => {
+    audio.init();
+    audio.playBugleCharge();
+    onJoinRoom(room.id, room.name, room.map, room.mode, remoteServer.trim() || undefined);
   };
 
   const handleSendChat = (e: React.FormEvent) => {
@@ -97,6 +109,14 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
         <div className="flex items-center gap-2 text-xs font-sans tracking-wider bg-[#0a0806] border border-[#3d2b1f] px-3 py-1.5 rounded">
           <Globe className="w-4 h-4 text-[#d4af37]" />
           <span className="text-[#d4af37] font-bold">ONLINE LOBBY</span>
+          <input
+            id="remote-server-input"
+            type="text"
+            value={remoteServer}
+            onChange={(e) => setRemoteServer(e.target.value)}
+            placeholder="Friend's server host:port (blank = this server)"
+            className="ml-2 bg-black/60 border border-[#3d2b1f] rounded px-2 py-1 text-[11px] font-mono text-stone-200 w-64 focus:border-[#d4af37] outline-none placeholder:text-[#5a4a33]"
+          />
         </div>
       </header>
 
@@ -134,16 +154,15 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     </div>
                     <div className="text-[11px] text-[#d4af37] font-mono mt-1">
                       Scores: Union {r.scores?.NORTH || 0} - Confederate {r.scores?.SOUTH || 0}
+                      {typeof r.botCount === 'number' && r.botCount > 0 && (
+                        <span className="text-[#8b7355]"> • {r.botCount} AI in the ranks</span>
+                      )}
                     </div>
                   </div>
 
                   <button
                     id={`btn-join-room-${r.id}`}
-                    onClick={() => {
-                      audio.init();
-                      audio.playBugleCharge();
-                      onJoinRoom(r.id, r.name, r.map, r.mode);
-                    }}
+                    onClick={() => handleJoinRemoteRoom(r)}
                     className="px-5 py-2.5 bg-gradient-to-b from-[#f4ecd8] via-[#8b7355] to-[#3d2b1f] hover:brightness-110 text-[#0a0806] font-vintage font-bold text-xs rounded border border-[#d4af37] shadow transition-all cursor-pointer tracking-wider"
                   >
                     JOIN BATTLE

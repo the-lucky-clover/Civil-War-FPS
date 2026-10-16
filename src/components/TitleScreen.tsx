@@ -6,11 +6,12 @@ import { audio } from '../services/audioService';
 import { factionAnthem } from '../game/bandMelodies';
 import { UnionFlag, ConfederateBattleFlag } from './BattleFlags';
 import { HISTORICAL_WEAPONS } from '../game/weapons';
+import { regimentsForFaction, regimentById } from '../game/regiments';
 import { Shield, Crosshair, Award, Volume2, HelpCircle, Swords, Users, Play, Sparkles, BookOpen, Settings, Check, Flame, Heart } from 'lucide-react';
 
 interface TitleScreenProps {
-  onStartCampaign: (faction: Faction, charClass: CharacterClass, mission: CampaignMission) => void;
-  onOpenMultiplayer: (faction: Faction, charClass: CharacterClass) => void;
+  onStartCampaign: (faction: Faction, charClass: CharacterClass, mission: CampaignMission, regimentId: string) => void;
+  onOpenMultiplayer: (faction: Faction, charClass: CharacterClass, regimentId: string) => void;
   onOpenArmory: () => void;
   onOpenLeaderboard: () => void;
   historicalSettings: HistoricalSettings;
@@ -32,6 +33,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const [selectedFaction, setSelectedFaction] = useState<Faction>('NORTH');
   const [selectedClass, setSelectedClass] = useState<CharacterClass>('INFANTRY');
   const [selectedMission, setSelectedMission] = useState<CampaignMission>(CAMPAIGN_MISSIONS[0]);
+  const [selectedRegimentId, setSelectedRegimentId] = useState<string>('20th_maine');
+  const availableRegiments = regimentsForFaction(selectedFaction);
+  const selectedRegiment = regimentById(selectedRegimentId) ?? availableRegiments[0];
   const [activeTab, setActiveTab] = useState<'CAMPAIGN' | 'CLASSES' | 'SETTINGS'>('CAMPAIGN');
   const [soundTestKey, setSoundTestKey] = useState<string>('');
   /** Which faction's march is currently previewing on hover/focus (null = none). */
@@ -77,15 +81,18 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         stopFactionMarchPreview();
         audio.init();
         audio.playBugleCharge();
-        onStartCampaign(selectedFaction, selectedClass, selectedMission);
+        onStartCampaign(selectedFaction, selectedClass, selectedMission, selectedRegimentId);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedFaction, selectedClass, selectedMission, activeTab, onStartCampaign]);
+  }, [selectedFaction, selectedClass, selectedMission, selectedRegimentId, activeTab, onStartCampaign]);
 
   const handleSelectFaction = (faction: Faction) => {
     setSelectedFaction(faction);
+    // Muster into the first regiment of the chosen army
+    const regs = regimentsForFaction(faction);
+    if (regs.length > 0) setSelectedRegimentId(regs[0].id);
     try {
       stopFactionMarchPreview();
       audio.init();
@@ -219,7 +226,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           type="button"
           onClick={() => {
             stopFactionMarchPreview();
-            onOpenMultiplayer(selectedFaction, selectedClass);
+            onOpenMultiplayer(selectedFaction, selectedClass, selectedRegimentId);
           }}
           className="cursor-pointer px-2.5 py-1.5 min-h-[40px] transition-all border-b-2 border-transparent hover:text-[#d4af37] hover:border-[#d4af37] flex items-center gap-1"
         >
@@ -292,7 +299,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   UNION
                 </span>
                 <span className="font-arcade text-[7px] sm:text-[8px] text-[#7ba4db]/80 leading-relaxed">
-                  20TH MAINE
+                  {selectedFaction === 'NORTH' ? selectedRegiment.short.toUpperCase() : '20TH MAINE'}
                   <br />
                   ARMY OF THE POTOMAC
                 </span>
@@ -336,7 +343,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   CSA
                 </span>
                 <span className="font-arcade text-[7px] sm:text-[8px] text-[#ff8a8a]/80 leading-relaxed">
-                  15TH ALABAMA
+                  {selectedFaction === 'SOUTH' ? selectedRegiment.short.toUpperCase() : '15TH ALABAMA'}
                   <br />
                   ARMY OF N. VIRGINIA
                 </span>
@@ -431,6 +438,30 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             </div>
           </div>
 
+          {/* Muster Roll — real Gettysburg regiments */}
+          <div>
+            <h2 className="text-xs font-sans tracking-widest text-[#d4af37] flex items-center gap-2 uppercase font-bold mb-2">
+              <BookOpen className="w-4 h-4 text-[#d4af37]" /> 3. Muster Roll — Join a Real Regiment
+            </h2>
+            <select
+              id="regiment-select"
+              value={selectedRegimentId}
+              onChange={(e) => setSelectedRegimentId(e.target.value)}
+              className="w-full bg-[#0a0806] border-2 border-[#3d2b1f] rounded px-2 py-2 text-xs font-vintage text-[#f4ecd8] focus:border-[#d4af37] outline-none cursor-pointer"
+            >
+              {availableRegiments.map((r) => (
+                <option key={r.id} value={r.id} className="bg-[#0a0806]">
+                  {r.name} — {r.commander}
+                </option>
+              ))}
+            </select>
+            <div className="mt-2 text-[10px] font-mono text-[#8b7355] leading-relaxed border border-[#3d2b1f] rounded p-2 bg-black/40">
+              <span className="text-[#d4af37] font-bold">{selectedRegiment.brigade}, {selectedRegiment.corps}</span>
+              <br />
+              {selectedRegiment.note}
+            </div>
+          </div>
+
           {/* Quick Controls Cheat-Sheet */}
           <div className="bg-[#0a0806] border border-[#3d2b1f] rounded p-2.5 text-[10px] sm:text-[11px] text-stone-400 font-mono">
             <div className="text-[#d4af37] font-bold mb-1 flex items-center justify-between">
@@ -514,7 +545,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   stopFactionMarchPreview();
                   audio.init();
                   audio.playBugleCharge();
-                  onStartCampaign(selectedFaction, selectedClass, selectedMission);
+                  onStartCampaign(selectedFaction, selectedClass, selectedMission, selectedRegimentId);
                 }}
                 className="w-full py-3.5 sm:py-4 bg-gradient-to-b from-[#f4ecd8] via-[#8b7355] to-[#3d2b1f] hover:brightness-110 text-[#0a0806] font-vintage font-black text-lg sm:text-xl rounded shadow-2xl border-2 border-[#d4af37] transition-all flex items-center justify-center gap-3 tracking-widest cursor-pointer transform active:scale-[0.99]"
               >

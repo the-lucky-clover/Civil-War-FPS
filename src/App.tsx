@@ -16,6 +16,7 @@ import {
 import { CAMPAIGN_MISSIONS } from './game/campaignData';
 import { GettysburgEngine, VETERAN_RANKS } from './game/threeEngine';
 import { factionMarch, factionAnthem } from './game/bandMelodies';
+import { regimentById } from './game/regiments';
 import { MultiplayerService } from './services/multiplayerService';
 import { TitleScreen } from './components/TitleScreen';
 import { GameHUD } from './components/GameHUD';
@@ -41,6 +42,8 @@ export default function App() {
   const [lastStandState, setLastStandState] = useState<{ active: boolean; remaining: number }>({ active: false, remaining: 0 });
   const [interactivePrompt, setInteractivePrompt] = useState<InteractivePrompt | null>(null);
   const [cannonState, setCannonState] = useState<{ isMounted: boolean; reloadProgress: number }>({ isMounted: false, reloadProgress: 1 });
+  const [cannonDrill, setCannonDrill] = useState<import('./game/cannonDrill').DrillState | null>(null);
+  const [regimentId, setRegimentId] = useState<string>('20th_maine');
   const [ticketState, setTicketState] = useState<TicketState>({ unionTickets: 500, confedTickets: 500 });
   const [minimapEntities, setMinimapEntities] = useState<MinimapEntity[]>([]);
   const [veteranRank, setVeteranRank] = useState<{ index: number; name: string; xp: number }>({ index: 0, name: 'Private', xp: 0 });
@@ -117,10 +120,11 @@ export default function App() {
   };
 
   // Start Campaign Mode - communicate objectives first via MissionBriefingModal
-  const handleStartCampaign = (chosenFaction: Faction, chosenClass: CharacterClass, mission: CampaignMission) => {
+  const handleStartCampaign = (chosenFaction: Faction, chosenClass: CharacterClass, mission: CampaignMission, chosenRegimentId: string) => {
     setFaction(chosenFaction);
     setCharClass(chosenClass);
     setSelectedMission(mission);
+    setRegimentId(chosenRegimentId);
     setWave(1);
     setTotalWaves(mission.waves);
     setScore(0);
@@ -157,14 +161,15 @@ export default function App() {
   };
 
   // Open Multiplayer Lobby
-  const handleOpenMultiplayer = (chosenFaction: Faction, chosenClass: CharacterClass) => {
+  const handleOpenMultiplayer = (chosenFaction: Faction, chosenClass: CharacterClass, chosenRegimentId: string) => {
     setFaction(chosenFaction);
     setCharClass(chosenClass);
+    setRegimentId(chosenRegimentId);
     setGameMode('MULTIPLAYER');
   };
 
   // Join or Create Multiplayer Room
-  const handleJoinMultiplayerRoom = (roomId: string, roomName: string, map: string, mode: 'TDM' | 'FFA') => {
+  const handleJoinMultiplayerRoom = (roomId: string, roomName: string, map: string, mode: 'TDM' | 'FFA', serverUrl?: string) => {
     setGameMode('CAMPAIGN');
     setIsPaused(false);
 
@@ -223,7 +228,9 @@ export default function App() {
       },
     });
 
-    mpService.connect(roomId, faction === 'NORTH' ? 'Union Soldier' : 'Rebel Soldier', faction, charClass, roomName);
+    const reg = regimentById(regimentId);
+    const soldierName = reg ? `${reg.short} Volunteer` : (faction === 'NORTH' ? 'Union Soldier' : 'Rebel Soldier');
+    mpService.connect(roomId, soldierName, faction, charClass, roomName, serverUrl, reg?.short);
     mpServiceRef.current = mpService;
   };
 
@@ -337,6 +344,14 @@ export default function App() {
           },
           onCannonStateChange: (isMounted, reloadProgress) => {
             setCannonState({ isMounted, reloadProgress });
+            if (!isMounted) setCannonDrill(null);
+          },
+          onCannonDrillState: (drill) => {
+            setCannonDrill({ ...drill });
+          },
+          onRemotePlayerCannonHit: (playerId, damage, weaponLabel) => {
+            // Our artillery caught an enemy soldier — report the casualty
+            mpServiceRef.current?.sendHit(playerId, damage, weaponLabel, false, false);
           },
           onLocalCannonFire: (data) => {
             // Our gunner fired — broadcast the shot to the room
@@ -532,6 +547,7 @@ export default function App() {
             lastStandState={lastStandState}
             interactivePrompt={interactivePrompt}
             cannonState={cannonState}
+            cannonDrill={cannonDrill}
             ticketState={ticketState}
             minimapEntities={minimapEntities}
             flagWaypoints={flagWaypoints}

@@ -20,6 +20,7 @@ export class MultiplayerService {
   public isConnected: boolean = false;
   public selfId: string = '';
   public ping: number = 0;
+  public serverBaseUrl: string = '';
   private pingInterval: number | null = null;
   private lastPingTime: number = 0;
 
@@ -27,9 +28,23 @@ export class MultiplayerService {
     this.callbacks = callbacks;
   }
 
-  public connect(roomId: string, playerName: string, faction: Faction, charClass: CharacterClass, roomName = 'The Angle') {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+  /**
+   * Connect to a game server.
+   * @param serverUrl optional "host:port" of a remote server (a friend's hosted
+   *   game). Defaults to the server that served this page.
+   */
+  public connect(roomId: string, playerName: string, faction: Faction, charClass: CharacterClass, roomName = 'The Angle', serverUrl?: string, regiment?: string) {
+    let wsUrl: string;
+    if (serverUrl) {
+      const host = serverUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${host}`;
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}`;
+    }
+    /** Base http(s) URL of the game server (for the rooms API). */
+    this.serverBaseUrl = wsUrl.replace(/^ws/, 'http');
 
     try {
       this.ws = new WebSocket(wsUrl);
@@ -45,6 +60,7 @@ export class MultiplayerService {
           name: playerName,
           faction,
           charClass,
+          regiment,
         }));
 
         this.startPingCheck();
@@ -161,6 +177,8 @@ export class MultiplayerService {
     direction: number[];
     rotY: number;
     pitch: number;
+    ammo: string;
+    impactPos?: number[];
   }) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ type: 'cannon_fire', ...payload }));

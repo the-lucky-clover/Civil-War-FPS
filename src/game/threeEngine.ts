@@ -16,6 +16,19 @@ import { voiceEngine } from '../services/voiceEngine';
 import { HISTORICAL_WEAPONS } from './weapons';
 import { CHARACTER_CLASSES } from './classesData';
 import {
+  DrillState,
+  DrillStationId,
+  CannonAmmoId,
+  CANNON_AMMO,
+  AMMO_ORDER,
+  DRILL_STATIONS,
+  stationDef,
+  nextStation,
+  freshDrillState,
+  COOKOFF_CHANCE,
+  COOKOFF_DAMAGE,
+} from './cannonDrill';
+import {
   sampleGettysburgWeather,
   sunPositionForHour,
   formatBattleHour,
@@ -42,12 +55,19 @@ export interface GameEngineCallbacks {
   onLastStandChange?: (isActive: boolean, timeLeft: number) => void;
   onInteractivePrompt?: (prompt: { action: string; key: string; distance: number } | null) => void;
   onCannonStateChange?: (mounted: boolean, reloadProgress: number) => void;
+  /** Crew-drill state for the manned piece (station, progress, ammo). */
+  onCannonDrillState?: (drill: DrillState) => void;
+  /** A remote multiplayer soldier was caught by our cannon fire. */
+  onRemotePlayerCannonHit?: (playerId: string, damage: number, weaponLabel: string) => void;
   onLocalCannonFire?: (data: {
     cannonId: string;
     muzzlePos: number[];
     direction: number[];
     rotY: number;
     pitch: number;
+    ammo: CannonAmmoId;
+    /** Impact point for shell/solid shot (computed by the firer). */
+    impactPos?: number[];
   }) => void;
   onTicketChange?: (union: number, confed: number) => void;
   onMinimapUpdate?: (entities: MinimapEntity[], flags: FlagWaypoint[]) => void;
@@ -267,6 +287,10 @@ export class GettysburgEngine {
     rotY: number;
     pitch: number;
     cooldown: number;
+    /** Full crew drill state (1861 field artillery drill). */
+    drill: DrillState;
+    /** Seconds remaining in the current timed drill station; -1 = awaiting crew action. */
+    drillTimer: number;
   }[] = [];
   public mountedCannon: {
     id: string;
@@ -276,8 +300,17 @@ export class GettysburgEngine {
     rotY: number;
     pitch: number;
     cooldown: number;
+    drill: DrillState;
+    drillTimer: number;
   } | null = null;
   public cannonReloadProgress: number = 1;
+  /** Live cannon projectiles (solid shot / shell) with ballistic arcs. */
+  private cannonProjectiles: {
+    mesh: THREE.Mesh;
+    vel: THREE.Vector3;
+    ammo: CannonAmmoId;
+    life: number;
+  }[] = [];
 
   // Interactive Barn / Farm Doors
   private interactiveDoors: {
@@ -1553,6 +1586,8 @@ export class GettysburgEngine {
       rotY,
       pitch: 0.08,
       cooldown: 0,
+      drill: freshDrillState(),
+      drillTimer: -1,
     });
   }
 
@@ -2045,9 +2080,18 @@ export class GettysburgEngine {
       if (e.code === 'KeyG') {
         this.triggerClassAbility();
       }
-      if (e.code === 'Digit1' && !this.mountedCannon) this.switchWeapon(this.playerFaction === 'NORTH' ? 'springfield_1861' : 'enfield_1853');
-      if (e.code === 'Digit2' && !this.mountedCannon) this.switchWeapon(this.playerFaction === 'NORTH' ? 'colt_navy_1851' : 'lemat_revolver');
-      if (e.code === 'Digit3' && !this.mountedCannon) this.switchWeapon(this.playerFaction === 'NORTH' ? 'spencer_repeater' : 'whitworth_sharpshooter');
+      if (e.code === 'Digit1') {
+        if (this.mountedCannon) this.selectCannonAmmo('SOLID_SHOT');
+        else this.switchWeapon(this.playerFaction === 'NORTH' ? 'springfield_1861' : 'enfield_1853');
+      }
+      if (e.code === 'Digit2') {
+        if (this.mountedCannon) this.selectCannonAmmo('SHELL');
+        else this.switchWeapon(this.playerFaction === 'NORTH' ? 'colt_navy_1851' : 'lemat_revolver');
+      }
+      if (e.code === 'Digit3') {
+        if (this.mountedCannon) this.selectCannonAmmo('CANISTER');
+        else this.switchWeapon(this.playerFaction === 'NORTH' ? 'spencer_repeater' : 'whitworth_sharpshooter');
+      }
     });
 
     window.addEventListener('keyup', (e) => {
@@ -2059,7 +2103,7 @@ export class GettysburgEngine {
         this.container.requestPointerLock();
       } else {
         if (this.mountedCannon) {
-          this.fireMountedCannon();
+          this.performDrillAction();
         } else {
           this.shootWeapon();
         }
@@ -2147,17 +2191,21 @@ export class GettysburgEngine {
 
     if (closestCannon) {
       this.mountedCannon = closestCannon;
+      // Fresh crew drill every time the piece is manned
+      closestCannon.drill = freshDrillState();
+      closestCannon.drillTimer = -1;
       // Position player at breech of cannon
       const backOffset = new THREE.Vector3(0, 0, -1.2).applyAxisAngle(new THREE.Vector3(0, 1, 0), closestCannon.rotY);
       this.playerPos.set(closestCannon.position.x + backOffset.x, 1.6, closestCannon.position.z + backOffset.z);
       this.yaw = closestCannon.rotY;
       this.pitch = closestCannon.pitch;
       this.callbacks.onCannonStateChange?.(true, this.cannonReloadProgress);
+      this.callbacks.onCannonDrillState?.(closestCannon.drill);
       audio.playCannonAim();
       this.callbacks.onAddScorePopup({
         id: `mount_${Date.now()}`,
-        text: 'MANNING NAPOLEON 12-POUNDER [LEFT-CLICK TO FIRE]',
-        x: window.innerWidth / 2 - 170,
+        text: 'MANNING NAPOLEON 12-POUNDER — WORK THE DRILL [CLICK = CREW ACTION]',
+        x: window.innerWidth / 2 - 220,
         y: window.innerHeight / 2 - 40,
         color: '#F59E0B',
         scale: 1.3,
@@ -2202,70 +2250,225 @@ export class GettysburgEngine {
     }
   }
 
-  public fireMountedCannon() {
-    if (!this.mountedCannon || this.mountedCannon.cooldown > 0) return;
+  /**
+   * Crew drill action (left-click while manning the piece).
+   * Walks the 1861 gun drill: SPONGE → LOAD → RAM → PRIME → AIM → READY → FIRE.
+   */
+  public performDrillAction() {
+    const cannon = this.mountedCannon;
+    if (!cannon || cannon.drillTimer > 0) return; // station already being worked
+    const drill = cannon.drill;
 
-    this.mountedCannon.cooldown = 4.5;
-    this.cannonReloadProgress = 0;
-    this.callbacks.onCannonStateChange?.(true, 0);
+    switch (drill.station) {
+      case 'SPONGE':
+      case 'LOAD':
+      case 'RAM':
+      case 'PRIME': {
+        const def = stationDef(drill.station);
+        drill.progress = 0;
+        cannon.drillTimer = def.duration;
+        // Station sounds at the start of the work
+        if (drill.station === 'SPONGE') audio.playSpongeHiss();
+        if (drill.station === 'RAM') audio.playRamThud();
+        if (drill.station === 'PRIME') audio.playPrimerClick();
+        this.callbacks.onCannonDrillState?.(drill);
+        break;
+      }
+      case 'AIM':
+        // Gunner is satisfied with the lay — crew stands clear
+        drill.station = 'READY';
+        drill.progress = 0;
+        cannon.drillTimer = stationDef('READY').duration;
+        voiceEngine.playRandomCommanderOrder(this.playerFaction, 'Ready! Stand clear of the piece!');
+        this.callbacks.onCannonDrillState?.(drill);
+        break;
+      case 'READY':
+        break; // crew is standing clear; the gun fires itself in a moment
+      case 'FIRE':
+        this.fireMountedCannon();
+        break;
+    }
+  }
 
-    audio.playCannonBlast();
-    this.addCameraShake(1.0);
-
-    // Muzzle position of mounted cannon
-    const forward = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.mountedCannon.rotY);
-    const muzzlePos = this.mountedCannon.position.clone().add(forward.clone().multiplyScalar(2.0)).add(new THREE.Vector3(0, 1.2, 0));
-
-    // Share the shot with the room — everyone sees and hears the piece fire
-    this.callbacks.onLocalCannonFire?.({
-      cannonId: this.mountedCannon.id,
-      muzzlePos: [muzzlePos.x, muzzlePos.y, muzzlePos.z],
-      direction: [forward.x, forward.y, forward.z],
-      rotY: this.mountedCannon.rotY,
-      pitch: this.mountedCannon.pitch,
+  /** Choose the ammunition nature while manning the piece (keys 1/2/3). */
+  public selectCannonAmmo(ammo: CannonAmmoId) {
+    const cannon = this.mountedCannon;
+    if (!cannon) return;
+    if (cannon.drill.ammo === ammo) return;
+    cannon.drill.ammo = ammo;
+    audio.playCannonAim();
+    const def = CANNON_AMMO[ammo];
+    this.callbacks.onAddScorePopup({
+      id: `ammo_${Date.now()}`,
+      text: `AMMUNITION: ${def.name.toUpperCase()} — ${def.use}`,
+      x: window.innerWidth / 2 - 200,
+      y: window.innerHeight / 2 + 60,
+      color: '#F5D547',
+      scale: 1.1,
+      opacity: 1,
+      time: Date.now(),
     });
+    this.callbacks.onCannonDrillState?.(cannon.drill);
+  }
 
-    // Heavy canister explosion smoke
+  /** Advance the drill when a timed station completes. */
+  private completeDrillStation() {
+    const cannon = this.mountedCannon;
+    if (!cannon) return;
+    const drill = cannon.drill;
+
+    switch (drill.station) {
+      case 'SPONGE':
+        drill.sponged = true;
+        drill.station = 'LOAD';
+        break;
+      case 'LOAD':
+        drill.station = 'RAM';
+        break;
+      case 'RAM': {
+        // Ramming a charge into an unsponged bore gambles with a live ember
+        if (!drill.sponged && Math.random() < COOKOFF_CHANCE) {
+          this.prematureDischarge();
+          return;
+        }
+        drill.station = 'PRIME';
+        break;
+      }
+      case 'PRIME':
+        drill.station = 'AIM';
+        voiceEngine.playRandomCommanderOrder(this.playerFaction, 'Lay the piece, gunner!');
+        break;
+      case 'READY':
+        drill.station = 'FIRE';
+        break;
+      default:
+        break;
+    }
+    drill.progress = 0;
+    cannon.drillTimer = -1;
+    this.callbacks.onCannonDrillState?.(drill);
+  }
+
+  /** A live ember sets the charge off in the bore while ramming — the gunner's nightmare. */
+  private prematureDischarge() {
+    const cannon = this.mountedCannon;
+    if (!cannon) return;
+    audio.playCookoff();
+    this.addCameraShake(0.7);
+    const muzzlePos = this.cannonMuzzlePos(cannon);
     this.spawnArtilleryExplosion(muzzlePos);
-    for (let i = 0; i < 10; i++) {
-      this.spawnSmokeParticle(muzzlePos, forward);
-    }
+    // The gunner takes the flash; the drill is ruined and starts over
+    this.health = Math.max(1, this.health - COOKOFF_DAMAGE);
+    this.callbacks.onHealthChange(this.health, this.maxHealth);
+    cannon.drill = freshDrillState();
+    cannon.drillTimer = -1;
+    this.callbacks.onCannonDrillState?.(cannon.drill);
+    voiceEngine.playRandomCommanderOrder(this.playerFaction, 'Premature discharge! Sponge her out and start over, damn it!');
+    this.callbacks.onAddScorePopup({
+      id: `cookoff_${Date.now()}`,
+      text: '⚠ PREMATURE DISCHARGE — SPONGE THE PIECE NEXT TIME',
+      x: window.innerWidth / 2 - 210,
+      y: window.innerHeight / 2 - 60,
+      color: '#FF4444',
+      scale: 1.4,
+      opacity: 1,
+      time: Date.now(),
+    });
+  }
 
-    // Huge canister tracer barrage in a forward fan
-    for (let i = 0; i < 8; i++) {
-      const fanDir = forward.clone().add(
-        new THREE.Vector3((Math.random() - 0.5) * 0.35, (Math.random() - 0.2) * 0.2, (Math.random() - 0.5) * 0.35)
-      ).normalize();
-      const tracerEnd = muzzlePos.clone().add(fanDir.multiplyScalar(60));
-      this.spawnBulletTracer(muzzlePos, tracerEnd, false);
-    }
+  private cannonMuzzlePos(cannon: NonNullable<GettysburgEngine['mountedCannon']>): THREE.Vector3 {
+    const forward = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), cannon.rotY);
+    // pitch the forward vector for elevation
+    forward.y = Math.tan(cannon.pitch);
+    forward.normalize();
+    return cannon.position.clone().add(forward.clone().multiplyScalar(2.0)).add(new THREE.Vector3(0, 1.2, 0));
+  }
 
-    // Cone damage to enemies within 60m and 40-degree angle
+  private cannonForward(cannon: NonNullable<GettysburgEngine['mountedCannon']>): THREE.Vector3 {
+    const forward = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), cannon.rotY);
+    forward.y = Math.tan(cannon.pitch);
+    return forward.normalize();
+  }
+
+  /** White steam curling from the muzzle while the wet sponge does its work. */
+  private spawnSteamParticle(pos: THREE.Vector3) {
+    const geo = new THREE.SphereGeometry(0.12 + Math.random() * 0.12, 6, 6);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xf2f4f4, transparent: true, opacity: 0.55 });
+    const puff = new THREE.Mesh(geo, mat);
+    puff.position.copy(pos).add(new THREE.Vector3((Math.random() - 0.5) * 0.4, Math.random() * 0.3, (Math.random() - 0.5) * 0.4));
+    this.scene.add(puff);
+    const life = { t: 0 };
+    const rise = () => {
+      if (this.isDisposed) { this.scene.remove(puff); return; }
+      life.t += 0.05;
+      puff.position.y += 0.09;
+      puff.scale.multiplyScalar(1.04);
+      (puff.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.55 - life.t * 0.35);
+      if (life.t < 1.6) requestAnimationFrame(rise);
+      else { this.scene.remove(puff); puff.geometry.dispose(); (puff.material as THREE.Material).dispose(); }
+    };
+    rise();
+  }
+
+  /** Launch a solid shot or shell on its ballistic arc. */
+  private launchCannonProjectile(muzzlePos: THREE.Vector3, dir: THREE.Vector3, ammo: CannonAmmoId) {
+    const def = CANNON_AMMO[ammo];
+    const geo = new THREE.SphereGeometry(ammo === 'SHELL' ? 0.16 : 0.13, 10, 10);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x141414, metalness: 0.8, roughness: 0.4 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(muzzlePos);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this.cannonProjectiles.push({
+      mesh,
+      vel: dir.clone().multiplyScalar(def.gameVelocity),
+      ammo,
+      life: 14,
+    });
+  }
+
+  /** Resolve a projectile impact: blast, crater smoke, and damage. */
+  private resolveCannonImpact(pos: THREE.Vector3, ammo: CannonAmmoId) {
+    const def = CANNON_AMMO[ammo];
+    this.spawnArtilleryExplosion(pos);
+    for (let i = 0; i < 6; i++) {
+      const d = new THREE.Vector3((Math.random() - 0.5), 0.6, (Math.random() - 0.5)).normalize();
+      this.spawnSmokeParticle(pos, d);
+    }
+    audio.playCannonBlast(0.7);
+
+    // Local campaign enemies caught in the burst
     let hitCount = 0;
     this.enemies.forEach((enemy) => {
       if (enemy.isDead) return;
-      const toEnemy = new THREE.Vector3(enemy.x - this.mountedCannon!.position.x, 0, enemy.z - this.mountedCannon!.position.z);
-      const dist = toEnemy.length();
-      if (dist < 65) {
-        const dot = toEnemy.normalize().dot(forward);
-        if (dot > 0.65) {
-          hitCount++;
-          const dmg = Math.round(250 + Math.random() * 100);
-          enemy.health -= dmg;
-          this.spawnBloodSplatter(new THREE.Vector3(enemy.x, 0.5, enemy.z));
-          this.callbacks.onHitEnemy?.(false, dmg);
-          if (enemy.health <= 0) {
-            this.handleEnemyKill(enemy, 'Napoleon 12-Pounder Canister', false, false);
-          }
+      const d = Math.hypot(enemy.x - pos.x, enemy.z - pos.z);
+      if (d < def.killRadius) {
+        const dmg = Math.round(def.damage * (1 - (d / def.killRadius) * 0.6));
+        enemy.health -= dmg;
+        this.spawnBloodSplatter(new THREE.Vector3(enemy.x, 0.5, enemy.z));
+        this.callbacks.onHitEnemy?.(false, dmg);
+        hitCount++;
+        if (enemy.health <= 0) {
+          this.handleEnemyKill(enemy, `Napoleon 12-Pounder ${def.name}`, false, false);
         }
       }
     });
 
+    // Multiplayer soldiers caught in the burst
+    this.remotePlayerMeshes.forEach((mesh, playerId) => {
+      const d = Math.hypot(mesh.position.x - pos.x, mesh.position.z - pos.z);
+      if (d < def.killRadius) {
+        const dmg = Math.round(def.damage * (1 - (d / def.killRadius) * 0.6));
+        this.callbacks.onRemotePlayerCannonHit?.(playerId, dmg, `Napoleon 12-Pounder ${def.name}`);
+        hitCount++;
+      }
+    });
+
     if (hitCount > 0) {
-      voiceEngine.playRandomCommanderOrder(this.playerFaction, "Direct hit with the 12-pounder! Keep pouring canister into them!");
+      voiceEngine.playRandomCommanderOrder(this.playerFaction, `Direct hit with the 12-pounder! Keep pouring ${def.short.toLowerCase()} into them!`);
       this.callbacks.onAddScorePopup({
         id: `cannon_hit_${Date.now()}`,
-        text: `💥 CANISTER DEVASTATION! (${hitCount} CASUALTIES)`,
+        text: `💥 ${def.name.toUpperCase()} DEVASTATION! (${hitCount} CASUALTIES)`,
         x: window.innerWidth / 2 - 140,
         y: window.innerHeight / 2 - 60,
         color: '#F59E0B',
@@ -2276,6 +2479,123 @@ export class GettysburgEngine {
     }
   }
 
+  public fireMountedCannon() {
+    const cannon = this.mountedCannon;
+    // The piece only fires when the crew drill has been fully worked
+    if (!cannon || cannon.drill.station !== 'FIRE') return;
+
+    const ammo = cannon.drill.ammo;
+    const def = CANNON_AMMO[ammo];
+    cannon.drill.roundsServed += 1;
+
+    audio.playLanyardSnap();
+    // Slight beat before the main charge — the primer's whisper before the roar
+    setTimeout(() => audio.playCannonBlast(), 90);
+    this.addCameraShake(1.0);
+
+    const forward = this.cannonForward(cannon);
+    const muzzlePos = this.cannonMuzzlePos(cannon);
+
+    // Heavy muzzle smoke
+    this.spawnArtilleryExplosion(muzzlePos);
+    for (let i = 0; i < 10; i++) {
+      this.spawnSmokeParticle(muzzlePos, forward);
+    }
+
+    let impactPos: number[] | undefined;
+    if (ammo === 'CANISTER') {
+      // 27 iron balls shredding apart at the muzzle — the giant shotgun
+      for (let i = 0; i < 12; i++) {
+        const fanDir = forward.clone().add(
+          new THREE.Vector3((Math.random() - 0.5) * 0.4, (Math.random() - 0.15) * 0.22, (Math.random() - 0.5) * 0.4)
+        ).normalize();
+        const tracerEnd = muzzlePos.clone().add(fanDir.multiplyScalar(60));
+        this.spawnBulletTracer(muzzlePos, tracerEnd, false);
+      }
+
+      // Cone damage to local enemies within 65m and ~40-degree arc
+      let hitCount = 0;
+      this.enemies.forEach((enemy) => {
+        if (enemy.isDead) return;
+        const toEnemy = new THREE.Vector3(enemy.x - cannon.position.x, 0, enemy.z - cannon.position.z);
+        const dist = toEnemy.length();
+        if (dist < 65) {
+          const dot = toEnemy.normalize().dot(forward);
+          if (dot > 0.65) {
+            hitCount++;
+            const dmg = Math.round(250 + Math.random() * 100);
+            enemy.health -= dmg;
+            this.spawnBloodSplatter(new THREE.Vector3(enemy.x, 0.5, enemy.z));
+            this.callbacks.onHitEnemy?.(false, dmg);
+            if (enemy.health <= 0) {
+              this.handleEnemyKill(enemy, 'Napoleon 12-Pounder Canister', false, false);
+            }
+          }
+        }
+      });
+
+      // Cone damage to multiplayer soldiers
+      this.remotePlayerMeshes.forEach((mesh, playerId) => {
+        const toP = new THREE.Vector3(mesh.position.x - cannon.position.x, 0, mesh.position.z - cannon.position.z);
+        const dist = toP.length();
+        if (dist < 65 && toP.normalize().dot(forward) > 0.65) {
+          const dmg = Math.round(250 + Math.random() * 100);
+          this.callbacks.onRemotePlayerCannonHit?.(playerId, dmg, 'Napoleon 12-Pounder Canister');
+          hitCount++;
+        }
+      });
+
+      if (hitCount > 0) {
+        voiceEngine.playRandomCommanderOrder(this.playerFaction, "Double-shotted canister! Mow them down!");
+        this.callbacks.onAddScorePopup({
+          id: `cannon_hit_${Date.now()}`,
+          text: `💥 CANISTER DEVASTATION! (${hitCount} CASUALTIES)`,
+          x: window.innerWidth / 2 - 140,
+          y: window.innerHeight / 2 - 60,
+          color: '#F59E0B',
+          scale: 1.6,
+          opacity: 1,
+          time: Date.now(),
+        });
+      }
+    } else {
+      // Solid shot and shell fly a true ballistic arc
+      this.launchCannonProjectile(muzzlePos, forward, ammo);
+      // Estimate the impact point for remote clients so they see the burst land
+      const v = def.gameVelocity;
+      const g = 9.8;
+      const vy = forward.y * v;
+      const vh = Math.hypot(forward.x * v, forward.z * v);
+      const tFlight = (vy + Math.sqrt(vy * vy + 2 * g * muzzlePos.y)) / g;
+      const range = Math.min(vh * tFlight, def.maxRange);
+      const impact = muzzlePos.clone().add(new THREE.Vector3(forward.x, 0, forward.z).normalize().multiplyScalar(range));
+      impact.y = this.getTerrainHeight(impact.x, impact.z);
+      impactPos = [impact.x, impact.y, impact.z];
+    }
+
+    // Share the shot with the room — everyone sees and hears the piece fire
+    this.callbacks.onLocalCannonFire?.({
+      cannonId: cannon.id,
+      muzzlePos: [muzzlePos.x, muzzlePos.y, muzzlePos.z],
+      direction: [forward.x, forward.y, forward.z],
+      rotY: cannon.rotY,
+      pitch: cannon.pitch,
+      ammo,
+      impactPos,
+    });
+
+    // The drill begins anew — sponge the piece!
+    const served = cannon.drill.roundsServed;
+    cannon.drill = freshDrillState();
+    cannon.drill.ammo = ammo; // keep the gunner's ammunition nature
+    cannon.drill.roundsServed = served;
+    cannon.drillTimer = -1;
+    this.cannonReloadProgress = 0;
+    this.callbacks.onCannonStateChange?.(true, 0);
+    this.callbacks.onCannonDrillState?.(cannon.drill);
+    voiceEngine.playRandomCommanderOrder(this.playerFaction, 'Sponge the piece! Serve her again!');
+  }
+
   /** Another player fired a field piece — render the shared spectacle locally. */
   public handleRemoteCannonFire(data: {
     shooterId: string;
@@ -2284,6 +2604,8 @@ export class GettysburgEngine {
     direction: number[];
     rotY: number;
     pitch: number;
+    ammo?: CannonAmmoId;
+    impactPos?: number[];
   }) {
     const muzzle = new THREE.Vector3(data.muzzlePos[0], data.muzzlePos[1], data.muzzlePos[2]);
     const dir = new THREE.Vector3(data.direction[0], data.direction[1], data.direction[2]);
@@ -2304,6 +2626,28 @@ export class GettysburgEngine {
     const vol = Math.max(0.12, 1 - dist / 140);
     audio.playCannonBlast(vol);
     if (dist < 45) this.addCameraShake(0.55 * (1 - dist / 45));
+
+    const ammo = data.ammo || 'CANISTER';
+    if (ammo === 'CANISTER') {
+      // Canister fan tracers so the cone reads at a distance
+      for (let i = 0; i < 6; i++) {
+        const fanDir = dir.clone().add(
+          new THREE.Vector3((Math.random() - 0.5) * 0.4, (Math.random() - 0.15) * 0.22, (Math.random() - 0.5) * 0.4)
+        ).normalize();
+        this.spawnBulletTracer(muzzle, muzzle.clone().add(fanDir.multiplyScalar(55)), false);
+      }
+    } else if (data.impactPos) {
+      // Solid shot / shell bursting where the firer's ballistics say it landed
+      const impact = new THREE.Vector3(data.impactPos[0], data.impactPos[1], data.impactPos[2]);
+      const impactDist = this.playerPos.distanceTo(impact);
+      if (impactDist < 220) {
+        this.spawnArtilleryExplosion(impact);
+        for (let i = 0; i < 5; i++) {
+          this.spawnSmokeParticle(impact, new THREE.Vector3((Math.random() - 0.5), 0.7, (Math.random() - 0.5)).normalize());
+        }
+        if (impactDist < 60) this.addCameraShake(0.4 * (1 - impactDist / 60));
+      }
+    }
   }
 
   // Mobile / Virtual Controller API
@@ -3357,6 +3701,52 @@ export class GettysburgEngine {
           this.cannonReloadProgress = 1 - (cannon.cooldown / 4.5);
           this.callbacks.onCannonStateChange?.(true, this.cannonReloadProgress);
         }
+      }
+    }
+
+    // Crew drill progress on the manned piece
+    const mounted = this.mountedCannon;
+    if (mounted && mounted.drillTimer > 0) {
+      const def = stationDef(mounted.drill.station);
+      mounted.drillTimer = Math.max(0, mounted.drillTimer - dt);
+      mounted.drill.progress = def.duration > 0 ? 1 - mounted.drillTimer / def.duration : 1;
+      this.callbacks.onCannonDrillState?.(mounted.drill);
+      // Wet sponge steaming while No. 1 works the bore
+      if (mounted.drill.station === 'SPONGE' && Math.random() < 0.35) {
+        this.spawnSteamParticle(this.cannonMuzzlePos(mounted));
+      }
+      if (mounted.drillTimer <= 0) {
+        this.completeDrillStation();
+      }
+    }
+
+    // Ballistic projectiles: solid shot and shell
+    for (let i = this.cannonProjectiles.length - 1; i >= 0; i--) {
+      const p = this.cannonProjectiles[i];
+      p.life -= dt;
+      p.vel.y -= 9.8 * dt;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      const groundY = this.getTerrainHeight(p.mesh.position.x, p.mesh.position.z);
+      const hitGround = p.mesh.position.y <= groundY + 0.1;
+      if (hitGround || p.life <= 0) {
+        const impact = p.mesh.position.clone();
+        impact.y = Math.max(impact.y, groundY);
+        // Solid shot skips: a fast graze kicks up dirt and bounces onward,
+        // the way round shot mowed through ranks
+        if (p.ammo === 'SOLID_SHOT' && hitGround && p.vel.length() > 45 && Math.random() < 0.6) {
+          this.spawnArtilleryExplosion(impact);
+          p.vel.y = Math.abs(p.vel.y) * 0.35;
+          p.vel.x *= 0.7;
+          p.vel.z *= 0.7;
+          p.mesh.position.y = groundY + 0.15;
+          p.life = Math.min(p.life, 3);
+          continue;
+        }
+        this.resolveCannonImpact(impact, p.ammo);
+        this.scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        (p.mesh.material as THREE.Material).dispose();
+        this.cannonProjectiles.splice(i, 1);
       }
     }
   }

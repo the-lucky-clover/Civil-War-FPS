@@ -1009,6 +1009,117 @@ class AudioService {
     }
   }
 
+  /** Wet sponge rammed home — steam hisses off the hot bronze bore. */
+  public playSpongeHiss() {
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+    const t = this.ctx.currentTime;
+    const bufferSize = this.ctx.sampleRate * 1.6;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      // sharp attack, slow steam decay
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.55));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(3200, t);
+    filter.frequency.exponentialRampToValueAtTime(900, t + 1.4);
+    filter.Q.setValueAtTime(0.8, t);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.55, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.sfxGain);
+    noise.start(t);
+  }
+
+  /** Rammer driving the charge home — two heavy wooden thuds. */
+  public playRamThud() {
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+    const t = this.ctx.currentTime;
+    for (let stroke = 0; stroke < 2; stroke++) {
+      const st = t + stroke * 0.55;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(95, st);
+      osc.frequency.exponentialRampToValueAtTime(38, st + 0.22);
+      gain.gain.setValueAtTime(0.9, st);
+      gain.gain.exponentialRampToValueAtTime(0.001, st + 0.3);
+      osc.connect(gain);
+      gain.connect(this.sfxGain);
+      osc.start(st);
+      osc.stop(st + 0.3);
+    }
+  }
+
+  /** Priming wire prick + friction primer seating — small metallic clicks. */
+  public playPrimerClick() {
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+    const t = this.ctx.currentTime;
+    [0, 0.28].forEach((dt, i) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(i === 0 ? 1900 : 2600, t + dt);
+      gain.gain.setValueAtTime(0.16, t + dt);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + dt + 0.05);
+      osc.connect(gain);
+      gain.connect(this.sfxGain);
+      osc.start(t + dt);
+      osc.stop(t + dt + 0.05);
+    });
+  }
+
+  /** Lanyard pull — sharp snap just before the blast. */
+  public playLanyardSnap() {
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(700, t);
+    osc.frequency.exponentialRampToValueAtTime(140, t + 0.12);
+    gain.gain.setValueAtTime(0.35, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    osc.connect(gain);
+    gain.connect(this.sfxGain);
+    osc.start(t);
+    osc.stop(t + 0.14);
+  }
+
+  /** Premature discharge in the bore — a flat, ugly crump instead of a roar. */
+  public playCookoff() {
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+    const t = this.ctx.currentTime;
+    const bufferSize = this.ctx.sampleRate * 0.5;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.ctx.sampleRate * 0.12));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(500, t);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(1.1, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.sfxGain);
+    noise.start(t);
+  }
+
   public playBugleCall(type: 'charge' | 'rally' | 'assembly' | 'retreat' = 'charge') {
     this.init();
     if (!this.ctx || !this.musicGain) return;

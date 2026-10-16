@@ -87,6 +87,11 @@ async function phase1_protocol() {
   for (const bot of bots) await bot.connect();
   console.log('  4 bots connected');
 
+  // Deterministic phase first: stand the AI force down so damage math is exact
+  a.send({ type: 'bot_config', botsPerSide: 0 });
+  const bcfg = await a.next(m => m.type === 'bot_config_ack', 5000).catch(() => null);
+  assert('bots: host can stand down the AI force', !!bcfg && bcfg.botsPerSide === 0);
+
   // Join
   const joined = await a.join();
   assert('join: room_joined received', joined.type === 'room_joined');
@@ -95,6 +100,25 @@ async function phase1_protocol() {
   for (const bot of [b, c, d]) await bot.join();
   await wait(400);
   assert('join: 4 players in room', joined.players !== undefined); // sanity on payload shape
+
+  // --- Phase 1b: server-side AI bots populate the room ---
+  // Muster the AI force, then expect AI soldiers to join the ranks.
+  a.send({ type: 'bot_config', botsPerSide: 3 });
+  await a.next(m => m.type === 'bot_config_ack' && m.botsPerSide === 3, 5000).catch(() => null);
+  const aiJoin = await a.next(m => m.type === 'player_joined' && m.player && m.player.isBot === true, 8000)
+    .catch(() => null);
+  assert('ai: server bots join the room', !!aiJoin, 'no isBot player_joined within 8s');
+  if (aiJoin) {
+    assert('ai: bot has a period name', typeof aiJoin.player.name === 'string' && aiJoin.player.name.length > 3, aiJoin.player.name);
+    assert('ai: bot mustered into a real regiment', typeof aiJoin.player.regiment === 'string' && aiJoin.player.regiment.length > 2, aiJoin.player.regiment);
+  }
+  const aiMove = await a.next(m => m.type === 'player_moved' && m.id !== a.id && m.id !== b.id && m.id !== c.id && m.id !== d.id, 8000)
+    .catch(() => null);
+  assert('ai: bots maneuver (player_moved)', !!aiMove);
+  // weapon_fired carries playerId — match any id that isn't our four test bots
+  const aiFire = await a.next(m => m.type === 'weapon_fired' && m.playerId && ![a.id, b.id, c.id, d.id].includes(m.playerId), 40000)
+    .catch(() => null);
+  assert('ai: bots engage the enemy (weapon_fired)', !!aiFire, 'no AI weapon_fired within 40s');
 
   // Movement broadcast
   b.clearInbox(); c.clearInbox(); d.clearInbox();
@@ -133,13 +157,23 @@ async function phase1_protocol() {
   const art = await b.next(m => m.type === 'artillery_barrage');
   assert('artillery: barrage broadcast', art.callerId === a.id);
 
-  // Cannon fire broadcast (player-worked field piece)
+  // Cannon fire broadcast (player-worked field piece, full drill payload)
   b.clearInbox();
   a.send({ type: 'cannon_fire', cannonId: 'cannon_north_1',
-    muzzlePos: [-15, 1.2, -8], direction: [0, 0.1, 1], rotY: 0, pitch: 0.1 });
+    muzzlePos: [-15, 1.2, -8], direction: [0, 0.1, 1], rotY: 0, pitch: 0.1,
+    ammo: 'SHELL', impactPos: [-15, 0.5, 120] });
   const cf = await b.next(m => m.type === 'cannon_fired');
   assert('cannon: cannon_fired broadcast', cf.cannonId === 'cannon_north_1');
   assert('cannon: shooter attributed', cf.shooterId === a.id);
+  assert('cannon: ammo nature forwarded', cf.ammo === 'SHELL', `got ${cf.ammo}`);
+  assert('cannon: impact point forwarded', Array.isArray(cf.impactPos) && cf.impactPos.length === 3);
+
+  // Cannon casualty: a shell bursting on a soldier reports through hit_registered
+  b.clearInbox();
+  a.send({ type: 'hit_registered', targetId: b.id, damage: 300, weapon: 'Napoleon 12-Pounder Shell' });
+  const cdmg = await b.next(m => m.type === 'damage_event' && m.victimId === b.id);
+  assert('cannon: shell damage unclamped (300 -> 0)', cdmg.isKill === true && cdmg.remainingHealth === 0,
+    `kill=${cdmg.isKill} hp=${cdmg.remainingHealth}`);
 
   // Chat
   b.clearInbox();
