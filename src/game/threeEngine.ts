@@ -15,6 +15,11 @@ import { audio } from '../services/audioService';
 import { voiceEngine } from '../services/voiceEngine';
 import { HISTORICAL_WEAPONS } from './weapons';
 import { CHARACTER_CLASSES } from './classesData';
+import {
+  sampleGettysburgWeather,
+  sunPositionForHour,
+  formatBattleHour,
+} from './gettysburgWeather';
 
 export interface GameEngineCallbacks {
   onHealthChange: (health: number, maxHealth: number) => void;
@@ -37,6 +42,13 @@ export interface GameEngineCallbacks {
   onLastStandChange?: (isActive: boolean, timeLeft: number) => void;
   onInteractivePrompt?: (prompt: { action: string; key: string; distance: number } | null) => void;
   onCannonStateChange?: (mounted: boolean, reloadProgress: number) => void;
+  onLocalCannonFire?: (data: {
+    cannonId: string;
+    muzzlePos: number[];
+    direction: number[];
+    rotY: number;
+    pitch: number;
+  }) => void;
   onTicketChange?: (union: number, confed: number) => void;
   onMinimapUpdate?: (entities: MinimapEntity[], flags: FlagWaypoint[]) => void;
   onOfficerOrder?: (order: OfficerOrder) => void;
@@ -101,6 +113,17 @@ export class GettysburgEngine {
   private rainPoints: THREE.Points | null = null;
   private rainPositions: Float32Array | null = null;
   private thunderTimer: number = 20;
+
+  // Historical Gettysburg weather — battle day, hour, temperature, wind
+  public battleDay: number = 1;
+  public battleHour: number = 9.5;
+  public tempF: number = 72;
+  public windMph: number = 12;
+  public windVec: THREE.Vector3 = new THREE.Vector3(0, 0, -1); // southerly breeze → drifts north (−z)
+  private battleHaze: number = 0; // extra fog density from cannon smoke, set per wave
+  private battleTitle: string = '';
+  private stormAnnounced: boolean = false;
+  private useHistoricalWeather: boolean = true;
 
   // Camera Shake & Trauma System
   public cameraTrauma: number = 0;
@@ -212,6 +235,8 @@ export class GettysburgEngine {
   private treeColliders: { x: number; z: number; r: number }[] = [];
   private ramrodMesh: THREE.Mesh | null = null;
   private hammerMesh: THREE.Mesh | null = null;
+  private cartridgeMesh: THREE.Mesh | null = null;
+  private pourPuffMesh: THREE.Mesh | null = null;
   public isSprinting: boolean = false;
   public isCrouching: boolean = false;
 
@@ -382,6 +407,20 @@ export class GettysburgEngine {
     this.muzzleFlashLight.position.set(0, 0.03, -1.35);
     this.gunPivot.add(this.muzzleFlashLight);
 
+    // Paper cartridge prop — travels cartridge box → teeth → muzzle during the loading drill
+    const cartGeo = new THREE.CylinderGeometry(0.016, 0.016, 0.10, 8);
+    const cartMat = new THREE.MeshStandardMaterial({ color: 0xC9A86A, roughness: 0.9 });
+    this.cartridgeMesh = new THREE.Mesh(cartGeo, cartMat);
+    this.cartridgeMesh.visible = false;
+    this.camera.add(this.cartridgeMesh);
+
+    // Powder pour puff — brief gray bloom at the muzzle while charging
+    const puffGeo = new THREE.SphereGeometry(0.035, 8, 8);
+    const puffMat = new THREE.MeshBasicMaterial({ color: 0xBBBBBB, transparent: true, opacity: 0 });
+    this.pourPuffMesh = new THREE.Mesh(puffGeo, puffMat);
+    this.pourPuffMesh.visible = false;
+    this.camera.add(this.pourPuffMesh);
+
     // Bayonet Mesh
     const bayonetGeo = new THREE.ConeGeometry(0.02, 0.45, 4);
     const bayonetMat = new THREE.MeshStandardMaterial({ color: 0xCCCCCC, metalness: 0.9, roughness: 0.2 });
@@ -432,6 +471,31 @@ export class GettysburgEngine {
     hammer.position.set(0.04, 0.04, -0.15);
     gun.add(hammer);
     this.hammerMesh = hammer;
+
+    // Lock plate on the right of the breech
+    const lockPlate = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.06, 0.16), hammerMat);
+    lockPlate.position.set(0.042, -0.02, -0.15);
+    gun.add(lockPlate);
+
+    // Trigger guard + trigger blade below the breech
+    const guard = new THREE.Mesh(new THREE.TorusGeometry(0.038, 0.007, 6, 12, Math.PI), hammerMat);
+    guard.rotation.y = Math.PI / 2;
+    guard.rotation.x = Math.PI;
+    guard.position.set(0, -0.125, -0.10);
+    gun.add(guard);
+    const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.032, 0.012), hammerMat);
+    trigger.position.set(0, -0.115, -0.10);
+    trigger.rotation.x = 0.25;
+    gun.add(trigger);
+
+    // Nose cap at the fore-end tip + steel buttplate
+    const noseCap = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.034, 0.05, 10), hammerMat);
+    noseCap.rotation.x = Math.PI / 2;
+    noseCap.position.set(0, -0.08, -0.755);
+    gun.add(noseCap);
+    const buttplate = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.13, 0.015), hammerMat);
+    buttplate.position.set(0, -0.08, 0.178);
+    gun.add(buttplate);
 
     // Ramrod underneath
     const ramrodGeo = new THREE.CylinderGeometry(0.008, 0.008, 1.2, 8);
@@ -713,101 +777,121 @@ export class GettysburgEngine {
   }
 
   public setWeather(weather: WeatherType) {
+    const prev = this.weatherType;
     this.weatherType = weather;
-    if (weather === 'LIGHT_RAIN') {
-      if (this.rainPoints) this.rainPoints.visible = true;
-      audio.startRainAmbience();
-      this.targetFogDensity = Math.max(0.018, this.targetFogDensity * 1.3);
-    } else if (weather === 'HEAVY_FOG') {
-      if (this.rainPoints) this.rainPoints.visible = false;
-      audio.stopRainAmbience();
-      this.targetFogDensity = 0.040;
-    } else {
-      if (this.rainPoints) this.rainPoints.visible = false;
-      audio.stopRainAmbience();
-      this.targetFogDensity = 0.012;
+    const raining = weather === 'LIGHT_RAIN' || weather === 'STORM';
+    if (this.rainPoints) this.rainPoints.visible = raining;
+    if (raining) audio.startRainAmbience();
+    else audio.stopRainAmbience();
+    // Fog density is owned by the historical timeline (plus battle haze),
+    // not by the weather switch — it no longer stomps targetFogDensity.
+    if (weather === 'STORM' && prev !== 'STORM' && !this.stormAnnounced) {
+      this.stormAnnounced = true;
+      this.callbacks.onAddScorePopup?.({
+        id: `storm_${Date.now()}`,
+        text: '⛈ THE SKY BREAKS — "the thunder seemed tame, after the artillery firing of the afternoon."',
+        x: window.innerWidth / 2 - 260,
+        y: window.innerHeight / 3,
+        color: '#9EC0E0',
+        scale: 1.25,
+        opacity: 1,
+        time: Date.now(),
+      });
     }
     this.callbacks.onAtmosphereChange?.(this.timeOfDayTitle, this.weatherType);
   }
 
   public setManualWeather(weather: WeatherType) {
+    // Manual override from the HUD picker: HEAVY_FOG explicitly thickens the air.
+    if (weather === 'HEAVY_FOG') this.targetFogDensity = 0.040;
     this.setWeather(weather);
   }
 
+  /** Begin the recorded Gettysburg weather for a battle day at a given hour. */
+  public startHistoricalWeather(day: number, hour: number, title: string, haze: number = 0) {
+    this.battleDay = day;
+    this.battleHour = hour;
+    this.battleTitle = title;
+    this.battleHaze = haze;
+    this.stormAnnounced = false;
+    this.useHistoricalWeather = true;
+    this.applyHistoricalSample();
+  }
+
+  private applyHistoricalSample() {
+    const s = sampleGettysburgWeather(this.battleDay, this.battleHour);
+    const cloud = s.cloudCover;
+    const stormy = s.precip === 'storm';
+
+    // Sky + fog palettes interpolate clear → overcast → storm-dark
+    const clearSky = new THREE.Color(0x6fa8dc);
+    const overSky = new THREE.Color(0x8a97a3);
+    const stormSky = new THREE.Color(0x39434e);
+    const sky = clearSky.lerp(overSky, cloud);
+    if (stormy) sky.lerp(stormSky, 0.65);
+    this.targetSkyColor.copy(sky);
+
+    const clearFog = new THREE.Color(0xd8cbb5);
+    const overFog = new THREE.Color(0xa8b0b8);
+    const fog = clearFog.lerp(overFog, cloud);
+    if (stormy) fog.lerp(new THREE.Color(0x5a6672), 0.6);
+    this.targetFogColor.copy(fog);
+    this.targetFogDensity = 0.010 + cloud * 0.010 + (stormy ? 0.010 : 0) + this.battleHaze;
+
+    // Sun tracks the real hour; clouds throttle it
+    const { elevation, azimuth } = sunPositionForHour(this.battleHour);
+    const dayCurve = Math.min(1, Math.max(0.05, elevation * 3));
+    this.targetSunIntensity = (1.5 - cloud * 1.05) * dayCurve;
+    const clearSun = new THREE.Color(0xfff5dd);
+    const overSun = new THREE.Color(0xe8e4da);
+    const sunCol = clearSun.lerp(overSun, cloud);
+    if (stormy) sunCol.lerp(new THREE.Color(0xb9c4ce), 0.5);
+    this.targetSunColor.copy(sunCol);
+    this.targetSunPosition.set(
+      -Math.cos(azimuth) * 140,
+      15 + Math.max(0, elevation) * 150,
+      -30 + Math.sin(azimuth) * 40
+    );
+
+    this.targetHemiSkyColor.setHex(0x87ceeb).lerp(new THREE.Color(0x9aa5b1), cloud);
+    this.targetHemiGroundColor.setHex(0x3d352a);
+    this.targetHemiIntensity = 0.75 - cloud * 0.25;
+
+    // Wind: the recorded southerly breeze (gusts in the storm), drifting north (−z)
+    this.windMph = stormy ? 22 : s.windMph;
+    this.windVec.set(0, 0, -1).multiplyScalar(this.windMph * 0.35);
+
+    this.tempF = s.tempF;
+    this.timeOfDayTitle =
+      `July ${this.battleDay} • ${formatBattleHour(this.battleHour)} • ${Math.round(this.tempF)}°F • ${this.battleTitle || s.label}`;
+
+    if (s.weather !== this.weatherType) this.setWeather(s.weather);
+    else this.callbacks.onAtmosphereChange?.(this.timeOfDayTitle, this.weatherType);
+  }
+
+  /** Advance the battle clock and drift the weather along the recorded timeline. */
+  private updateHistoricalWeather(dt: number) {
+    // 1 game-hour per 4 real minutes — a full battle sees the sky change.
+    this.battleHour += dt / 240;
+    if (this.battleHour >= 21.5) this.battleHour = 21.5; // hold at last light
+    this.applyHistoricalSample();
+  }
+
   public applyTimeOfDayForWave(waveNumber: number) {
+    // Daytime battles ride the recorded July 1–3 Gettysburg weather timeline;
+    // each wave picks up the battle clock at the historical hour (plus gunsmoke haze).
+    // The night mission keeps its bespoke moonlit look.
     if (this.currentMissionId === 'day1_mcpherson') {
-      if (waveNumber === 1) {
-        this.timeOfDayTitle = '09:30 AM • Morning Mist';
-        this.targetSkyColor.setHex(0x8EC3EB);
-        this.targetFogColor.setHex(0xD8CBB5);
-        this.targetFogDensity = 0.014;
-        this.targetSunColor.setHex(0xFFF2D0);
-        this.targetSunIntensity = 1.1;
-        this.targetSunPosition.set(80, 60, -60);
-        this.targetHemiSkyColor.setHex(0x8EC3EB);
-        this.targetHemiGroundColor.setHex(0x3d352a);
-        this.setWeather('CLEAR');
-      } else if (waveNumber === 2) {
-        this.timeOfDayTitle = '10:15 AM • Light Rain Squall';
-        this.targetSkyColor.setHex(0x768EA0);
-        this.targetFogColor.setHex(0xA8B4BC);
-        this.targetFogDensity = 0.020;
-        this.targetSunColor.setHex(0xE0DED6);
-        this.targetSunIntensity = 0.85;
-        this.targetSunPosition.set(50, 90, -40);
-        this.targetHemiSkyColor.setHex(0x768EA0);
-        this.targetHemiGroundColor.setHex(0x2E2A25);
-        this.setWeather('LIGHT_RAIN');
-      } else {
-        this.timeOfDayTitle = '11:00 AM • High Noon Skirmish';
-        this.targetSkyColor.setHex(0x64A6E0);
-        this.targetFogColor.setHex(0xD2C0A5);
-        this.targetFogDensity = 0.011;
-        this.targetSunColor.setHex(0xFFF9E6);
-        this.targetSunIntensity = 1.45;
-        this.targetSunPosition.set(10, 140, -20);
-        this.targetHemiSkyColor.setHex(0x64A6E0);
-        this.targetHemiGroundColor.setHex(0x3E382A);
-        this.setWeather('CLEAR');
-      }
+      // July 1 — overcast all day, gentle 12 mph southerly breeze, 72→76°F
+      if (waveNumber === 1) this.startHistoricalWeather(1, 9.5, 'Morning Mist', 0.004);
+      else if (waveNumber === 2) this.startHistoricalWeather(1, 10.5, 'Mid-Morning Skirmish', 0.004);
+      else this.startHistoricalWeather(1, 11.5, 'High Noon Skirmish', 0.002);
     } else if (this.currentMissionId === 'day2_roundtop') {
-      if (waveNumber === 1) {
-        this.timeOfDayTitle = '04:30 PM • Warm Afternoon Sun';
-        this.targetSkyColor.setHex(0xF4A261);
-        this.targetFogColor.setHex(0xD99B82);
-        this.targetFogDensity = 0.014;
-        this.targetSunColor.setHex(0xFFD6A5);
-        this.targetSunIntensity = 1.25;
-        this.targetSunPosition.set(-90, 80, 70);
-        this.setWeather('CLEAR');
-      } else if (waveNumber === 2) {
-        this.timeOfDayTitle = '05:15 PM • Amber Golden Hour';
-        this.targetSkyColor.setHex(0xE76F51);
-        this.targetFogColor.setHex(0xC27664);
-        this.targetFogDensity = 0.016;
-        this.targetSunColor.setHex(0xFFA552);
-        this.targetSunIntensity = 1.15;
-        this.targetSunPosition.set(-110, 50, 85);
-        this.setWeather('CLEAR');
-      } else if (waveNumber === 3) {
-        this.timeOfDayTitle = '06:00 PM • Heavy Cannonade Fog';
-        this.targetSkyColor.setHex(0xB85741);
-        this.targetFogColor.setHex(0x8C5042);
-        this.targetFogDensity = 0.038;
-        this.targetSunColor.setHex(0xFF6B4A);
-        this.targetSunIntensity = 0.95;
-        this.targetSunPosition.set(-125, 30, 95);
-        this.setWeather('HEAVY_FOG');
-      } else {
-        this.timeOfDayTitle = '06:30 PM • Twilight Bayonet Charge';
-        this.targetSkyColor.setHex(0x3D2645);
-        this.targetFogColor.setHex(0x281A32);
-        this.targetFogDensity = 0.024;
-        this.targetSunColor.setHex(0xDD5555);
-        this.targetSunIntensity = 0.65;
-        this.targetSunPosition.set(-140, 10, 110);
-        this.setWeather('CLEAR');
-      }
+      // July 2 — morning clouds clear through the afternoon, 74→81°F
+      if (waveNumber === 1) this.startHistoricalWeather(2, 16.0, 'Warm Afternoon Sun', 0);
+      else if (waveNumber === 2) this.startHistoricalWeather(2, 17.25, 'Amber Golden Hour', 0.004);
+      else if (waveNumber === 3) this.startHistoricalWeather(2, 18.0, 'Heavy Cannonade Fog', 0.016);
+      else this.startHistoricalWeather(2, 18.5, 'Twilight Bayonet Charge', 0.008);
     } else if (this.currentMissionId === 'day2_wheatfield_night') {
       if (waveNumber === 1) {
         this.timeOfDayTitle = '09:00 PM • Twilight Gloom & Fog';
@@ -837,54 +921,15 @@ export class GettysburgEngine {
         this.targetSunPosition.set(10, 45, -20);
         this.setWeather('HEAVY_FOG');
       }
+      this.useHistoricalWeather = false;
+      this.tempF = 76; // recorded 9 PM reading, July 2
     } else {
-      // Day 3 Pickett's Charge / The Angle
-      if (waveNumber === 1) {
-        this.timeOfDayTitle = '01:00 PM • Blazing Summer Heat';
-        this.targetSkyColor.setHex(0xD4AF37);
-        this.targetFogColor.setHex(0xBA9F72);
-        this.targetFogDensity = 0.014;
-        this.targetSunColor.setHex(0xFFF5DD);
-        this.targetSunIntensity = 1.4;
-        this.targetSunPosition.set(0, 180, 80);
-        this.setWeather('CLEAR');
-      } else if (waveNumber === 2) {
-        this.timeOfDayTitle = '02:45 PM • 150 Cannon Gunsmoke';
-        this.targetSkyColor.setHex(0xC29845);
-        this.targetFogColor.setHex(0x9E7E52);
-        this.targetFogDensity = 0.026;
-        this.targetSunColor.setHex(0xFFDCA8);
-        this.targetSunIntensity = 1.2;
-        this.targetSunPosition.set(-20, 150, 70);
-        this.setWeather('HEAVY_FOG');
-      } else if (waveNumber === 3) {
-        this.timeOfDayTitle = '03:15 PM • Dense Canister Smoke';
-        this.targetSkyColor.setHex(0x9E6F32);
-        this.targetFogColor.setHex(0x7D5C3A);
-        this.targetFogDensity = 0.038;
-        this.targetSunColor.setHex(0xFFA055);
-        this.targetSunIntensity = 1.0;
-        this.targetSunPosition.set(-40, 120, 60);
-        this.setWeather('HEAVY_FOG');
-      } else if (waveNumber === 4) {
-        this.timeOfDayTitle = '03:30 PM • Armistead Breaches The Wall';
-        this.targetSkyColor.setHex(0x784420);
-        this.targetFogColor.setHex(0x5A351D);
-        this.targetFogDensity = 0.044;
-        this.targetSunColor.setHex(0xFF7040);
-        this.targetSunIntensity = 0.85;
-        this.targetSunPosition.set(-60, 90, 50);
-        this.setWeather('HEAVY_FOG');
-      } else {
-        this.timeOfDayTitle = '03:45 PM • High Water Mark Climax';
-        this.targetSkyColor.setHex(0x603018);
-        this.targetFogColor.setHex(0x402010);
-        this.targetFogDensity = 0.036;
-        this.targetSunColor.setHex(0xFFAA33);
-        this.targetSunIntensity = 1.1;
-        this.targetSunPosition.set(-80, 65, 45);
-        this.setWeather('CLEAR');
-      }
+      // July 3 — blazing heat, the great cannonade, then the storm breaks
+      if (waveNumber === 1) this.startHistoricalWeather(3, 13.0, 'Blazing Summer Heat', 0);
+      else if (waveNumber === 2) this.startHistoricalWeather(3, 14.0, '150 Cannon Gunsmoke', 0.014);
+      else if (waveNumber === 3) this.startHistoricalWeather(3, 15.0, 'Dense Canister Smoke', 0.022);
+      else if (waveNumber === 4) this.startHistoricalWeather(3, 15.5, 'Armistead Breaches The Wall', 0.026);
+      else this.startHistoricalWeather(3, 16.0, 'High Water Mark \u2014 Storm Breaking', 0.012);
     }
 
     this.callbacks.onAtmosphereChange?.(this.timeOfDayTitle, this.weatherType);
@@ -916,6 +961,9 @@ export class GettysburgEngine {
   }
 
   private updateAtmosphereAndWeather(dt: number) {
+    // The recorded July 1–3 weather drifts underneath everything (except the night mission).
+    if (this.useHistoricalWeather) this.updateHistoricalWeather(dt);
+
     const lerpFactor = dt * 1.4;
     this.currentSkyColor.lerp(this.targetSkyColor, lerpFactor);
     this.scene.background = this.currentSkyColor;
@@ -952,15 +1000,18 @@ export class GettysburgEngine {
     this.currentHemiIntensity += (this.targetHemiIntensity - this.currentHemiIntensity) * lerpFactor;
     this.hemiLight.intensity = this.currentHemiIntensity;
 
-    // Rain particles update
-    if (this.weatherType === 'LIGHT_RAIN' && this.rainPoints && this.rainPositions) {
+    // Rain particles update (storm cells ride the same southerly breeze)
+    const isRaining = this.weatherType === 'LIGHT_RAIN' || this.weatherType === 'STORM';
+    if (isRaining && this.rainPoints && this.rainPositions) {
       const pCount = this.rainPositions.length / 3;
       const px = this.playerPos.x;
       const pz = this.playerPos.z;
 
       for (let i = 0; i < pCount; i++) {
         this.rainPositions[i * 3 + 1] -= 36 * dt; // Fall fast
-        this.rainPositions[i * 3] += 3.5 * dt;    // Wind drift
+        // Recorded southerly breeze drives the rain northward (−z)
+        this.rainPositions[i * 3] += this.windVec.x * dt;
+        this.rainPositions[i * 3 + 2] += this.windVec.z * dt;
 
         if (this.rainPositions[i * 3 + 1] < 0) {
           this.rainPositions[i * 3 + 1] = 28 + Math.random() * 8;
@@ -1031,24 +1082,44 @@ export class GettysburgEngine {
   }
 
   private buildGettysburgScenery() {
-    // 1. Stone Wall at The Angle — on the Cemetery Ridge crest (Union line)
-    const stoneWallMat = new THREE.MeshStandardMaterial({ color: 0x777571, roughness: 0.95 });
-    for (let z = -32; z <= 24; z += 3.8) {
-      const stoneMesh = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.9, 3.6), stoneWallMat);
-      stoneMesh.castShadow = true;
-      stoneMesh.receiveShadow = true;
-      this.placeOnTerrain(stoneMesh, 20, z, 0.45);
-      this.scene.add(stoneMesh);
-    }
+    // 1. Stone Wall at The Angle — hand-laid irregular courses on the Cemetery Ridge crest
+    const stoneMats = [0x777571, 0x6e6c68, 0x7f7d79, 0x716f6b].map(
+      (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95 })
+    );
+    const layWallSection = (cx: number, cz: number, alongX: boolean) => {
+      const section = new THREE.Group();
+      const courses = 3;
+      const stonesPerCourse = 4;
+      for (let c = 0; c < courses; c++) {
+        const y = 0.16 + c * 0.29;
+        for (let i = 0; i < stonesPerCourse; i++) {
+          const courseLen = 3.8 / stonesPerCourse;
+          const w = 0.55 + Math.random() * 0.25;
+          const h = 0.24 + Math.random() * 0.10;
+          const l = courseLen * (0.92 + Math.random() * 0.12);
+          const stone = new THREE.Mesh(
+            new THREE.BoxGeometry(alongX ? l : w, h, alongX ? w : l),
+            stoneMats[Math.floor(Math.random() * stoneMats.length)]
+          );
+          const off = (i - (stonesPerCourse - 1) / 2) * courseLen + (Math.random() - 0.5) * 0.08;
+          stone.position.set(
+            alongX ? off : (Math.random() - 0.5) * 0.10,
+            y + (Math.random() - 0.5) * 0.03,
+            alongX ? (Math.random() - 0.5) * 0.10 : off
+          );
+          stone.rotation.y = (Math.random() - 0.5) * 0.12;
+          stone.castShadow = true;
+          stone.receiveShadow = true;
+          section.add(stone);
+        }
+      }
+      this.placeOnTerrain(section, cx, cz, 0);
+      this.scene.add(section);
+    };
+    for (let z = -32; z <= 24; z += 3.8) layWallSection(20, z, false);
 
     // 2. The 90-degree Angle section — wall jogs east at the Copse
-    for (let x = 20; x <= 44; x += 3.8) {
-      const stoneMesh = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.9, 0.8), stoneWallMat);
-      stoneMesh.castShadow = true;
-      stoneMesh.receiveShadow = true;
-      this.placeOnTerrain(stoneMesh, x, 24, 0.45);
-      this.scene.add(stoneMesh);
-    }
+    for (let x = 20; x <= 44; x += 3.8) layWallSection(x, 24, true);
 
     // 3. Worm Fences — west of Emmitsburg Road
     const woodMat = new THREE.MeshStandardMaterial({ color: 0x6E543C, roughness: 0.85 });
@@ -1358,34 +1429,118 @@ export class GettysburgEngine {
   }
 
   private createArtilleryCannon(x: number, y: number, z: number, rotY: number, id: string) {
+    // 12-pounder Napoleon — bronze smoothbore profile, spoked wheels, split trail
     const cannonGroup = new THREE.Group();
     const barrelPivot = new THREE.Group();
     barrelPivot.position.set(0, 1.2, 0.4);
 
-    const barrel = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.18, 0.28, 2.6, 16),
-      new THREE.MeshStandardMaterial({ color: 0xBF8040, metalness: 0.9, roughness: 0.25 })
-    );
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(0, 0, 0.8);
-    barrel.castShadow = true;
-    barrelPivot.add(barrel);
+    const bronzeMat = new THREE.MeshStandardMaterial({ color: 0x9a7b2d, metalness: 0.9, roughness: 0.3 });
+    const ironMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2b, metalness: 0.8, roughness: 0.4 });
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x553C28, roughness: 0.8 });
 
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x553C28, roughness: 0.8 });
-    const wheelGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.15, 16);
-    const leftWheel = new THREE.Mesh(wheelGeo, wheelMat);
-    leftWheel.rotation.z = Math.PI / 2;
-    leftWheel.position.set(-0.7, 0.8, 0);
+    // Barrel from the breech: cascabel, breech, reinforces, chase, muzzle swell
+    const barrelSegs: [number, number, number][] = [
+      [0.24, 0.45, -0.85],  // breech
+      [0.215, 0.55, -0.35], // first reinforce
+      [0.19, 0.55, 0.20],   // second reinforce
+      [0.165, 1.0, 0.95],   // chase
+      [0.20, 0.18, 1.50],   // muzzle swell
+    ];
+    for (const [r, len, zc] of barrelSegs) {
+      const seg = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 14), bronzeMat);
+      seg.rotation.x = Math.PI / 2;
+      seg.position.set(0, 0, zc);
+      seg.castShadow = true;
+      barrelPivot.add(seg);
+    }
+    for (const zc of [-0.62, -0.08, 0.47]) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.225, 0.028, 8, 18), bronzeMat);
+      ring.position.set(0, 0, zc);
+      barrelPivot.add(ring);
+    }
+    const cascabel = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 12), bronzeMat);
+    cascabel.position.set(0, 0, -1.14);
+    barrelPivot.add(cascabel);
+    const cascabelNeck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.12, 10), bronzeMat);
+    cascabelNeck.rotation.x = Math.PI / 2;
+    cascabelNeck.position.set(0, 0, -1.05);
+    barrelPivot.add(cascabelNeck);
+    for (const sx of [-0.24, 0.24]) {
+      const trunnion = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.12, 10), bronzeMat);
+      trunnion.rotation.z = Math.PI / 2;
+      trunnion.position.set(sx, 0, -0.35);
+      barrelPivot.add(trunnion);
+    }
 
-    const rightWheel = new THREE.Mesh(wheelGeo, wheelMat);
-    rightWheel.rotation.z = Math.PI / 2;
-    rightWheel.position.set(0.7, 0.8, 0);
+    // Spoked wheels — iron tire in the YZ plane, wooden spokes, hub on the X axle
+    const makeWheel = (sx: number) => {
+      const wheel = new THREE.Group();
+      const tire = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.05, 8, 24), ironMat);
+      tire.rotation.y = Math.PI / 2;
+      wheel.add(tire);
+      const spokeGeo = new THREE.CylinderGeometry(0.035, 0.045, 0.62, 6);
+      for (let i = 0; i < 10; i++) {
+        const holder = new THREE.Group();
+        holder.rotation.x = (i / 10) * Math.PI * 2;
+        const spoke = new THREE.Mesh(spokeGeo, woodMat);
+        spoke.position.y = 0.41;
+        holder.add(spoke);
+        wheel.add(holder);
+      }
+      const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.22, 10), woodMat);
+      hub.rotation.z = Math.PI / 2;
+      wheel.add(hub);
+      const hubBand = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.02, 6, 14), ironMat);
+      hubBand.rotation.y = Math.PI / 2;
+      wheel.add(hubBand);
+      wheel.position.set(sx, 0.77, 0);
+      wheel.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = true; });
+      return wheel;
+    };
 
-    const trail = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 2.2), wheelMat);
-    trail.position.set(0, 0.5, -0.9);
-    trail.rotation.x = -0.2;
+    const axle = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.16, 0.16), woodMat);
+    axle.position.set(0, 0.77, 0);
+    axle.castShadow = true;
 
-    cannonGroup.add(barrelPivot, leftWheel, rightWheel, trail);
+    // Split trail arms sweeping back to the ground, joined by a transom
+    const trailArmGeo = new THREE.BoxGeometry(0.16, 0.22, 2.4);
+    const trailL = new THREE.Mesh(trailArmGeo, woodMat);
+    trailL.position.set(-0.28, 0.55, -1.15);
+    trailL.rotation.x = -0.18;
+    trailL.rotation.y = 0.10;
+    trailL.castShadow = true;
+    const trailR = new THREE.Mesh(trailArmGeo, woodMat);
+    trailR.position.set(0.28, 0.55, -1.15);
+    trailR.rotation.x = -0.18;
+    trailR.rotation.y = -0.10;
+    trailR.castShadow = true;
+    const transom = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.14, 0.2), woodMat);
+    transom.position.set(0, 0.62, -0.55);
+
+    // Elevating screw under the breech
+    const screw = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.5, 8), ironMat);
+    screw.position.set(0, 0.95, -0.35);
+
+    // Ammunition chest, shot pyramid, sponge bucket
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.35, 0.4), woodMat);
+    chest.position.set(0, 0.95, -1.5);
+    chest.castShadow = true;
+    const shotMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.7, roughness: 0.5 });
+    const shotGeo = new THREE.SphereGeometry(0.11, 10, 10);
+    for (const [ox, oz] of [[-0.14, 0], [0.14, 0], [0, 0.24]] as [number, number][]) {
+      const ball = new THREE.Mesh(shotGeo, shotMat);
+      ball.position.set(ox, 0.11, -2.15 + oz);
+      ball.castShadow = true;
+      cannonGroup.add(ball);
+    }
+    const topBall = new THREE.Mesh(shotGeo, shotMat);
+    topBall.position.set(0, 0.28, -2.07);
+    cannonGroup.add(topBall);
+    const bucket = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.11, 0.3, 10), woodMat);
+    bucket.position.set(0.55, 0.15, -1.9);
+
+    cannonGroup.add(barrelPivot, makeWheel(-0.78), makeWheel(0.78), axle,
+      trailL, trailR, transom, screw, chest, bucket);
     cannonGroup.position.set(x, y, z);
     cannonGroup.rotation.y = rotY;
     this.scene.add(cannonGroup);
@@ -1709,10 +1864,9 @@ export class GettysburgEngine {
 
     // Authentic Uniform Colors & Regimental distinctions
     const isAuthentic = this.historicalSettings.authenticUniforms;
-    const coatColor = faction === 'NORTH' 
+    const coatColor = faction === 'NORTH'
       ? (isAuthentic ? 0x14213d : 0x1d3c61) // 20th Maine Dark Indigo Wool
       : (charType === 'OFFICER_BOSS' ? 0x707070 : (isAuthentic ? 0x7D6C56 : 0x666666)); // 15th Alabama Butternut Homespun
-
     const pantsColor = faction === 'NORTH' ? 0x4A6B82 : (isAuthentic ? 0x635747 : 0x555555);
     const hatColor = faction === 'NORTH' ? (isAuthentic ? 0x0a0f18 : 0x121C2D) : 0x57483B;
 
@@ -1721,81 +1875,145 @@ export class GettysburgEngine {
     const skinMat = new THREE.MeshStandardMaterial({ color: 0xD4A373, roughness: 0.6 });
     const leatherMat = new THREE.MeshStandardMaterial({ color: 0x2B1810, roughness: 0.5 });
     const hatMat = new THREE.MeshStandardMaterial({ color: hatColor, roughness: 0.7 });
+    const brassMat = new THREE.MeshStandardMaterial({ color: 0xD4AF37, metalness: 0.9, roughness: 0.2 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, metalness: 0.85, roughness: 0.35 });
 
-    // Torso
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), coatMat);
-    torso.position.y = 1.25;
+    // Torso — sack coat tapered at the waist, skirt below the belt
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.235, 0.68, 10), coatMat);
+    torso.position.y = 1.26;
     torso.castShadow = true;
+    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(0.245, 0.28, 0.22, 10), coatMat);
+    skirt.position.y = 0.86;
 
-    // Belt & Buckle
-    const belt = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.08, 0.32), leatherMat);
+    // Belt, buckle and keeper
+    const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.252, 0.252, 0.09, 10), leatherMat);
     belt.position.y = 1.0;
-    const buckle = new THREE.Mesh(
-      new THREE.BoxGeometry(0.12, 0.09, 0.02),
-      new THREE.MeshStandardMaterial({ color: 0xD4AF37, metalness: 0.9, roughness: 0.2 })
-    );
-    buckle.position.set(0, 1.0, 0.17);
+    const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.03), brassMat);
+    buckle.position.set(0, 1.0, 0.25);
 
-    // Blanket Bedroll
+    // Cartridge box on the right hip with brass breastplate
+    const cartBox = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.18, 0.12), leatherMat);
+    cartBox.position.set(0.30, 0.98, -0.08);
+    const cartPlate = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, 0.02), brassMat);
+    cartPlate.position.set(0.30, 0.98, -0.015);
+
+    // Cap pouch at the belt, front right
+    const capPouch = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.10, 0.07), leatherMat);
+    capPouch.position.set(0.16, 1.02, 0.24);
+
+    // Canteen slung on the left hip
+    const canteen = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.10, 0.10, 0.05, 12),
+      new THREE.MeshStandardMaterial({ color: 0x8a9a5b, roughness: 0.7 })
+    );
+    canteen.rotation.z = Math.PI / 2;
+    canteen.position.set(-0.32, 1.02, 0);
+
+    // Blanket bedroll across the chest
     const roll = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.08, 0.08, 0.75, 8),
+      new THREE.CylinderGeometry(0.08, 0.08, 0.78, 8),
       new THREE.MeshStandardMaterial({ color: faction === 'NORTH' ? 0x2E2E2E : 0x998877, roughness: 0.9 })
     );
     roll.rotation.z = Math.PI / 4;
-    roll.position.set(0, 1.28, -0.05);
+    roll.position.set(0, 1.30, -0.02);
+    roll.castShadow = true;
 
-    // Head
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 12), skinMat);
+    // Head and kepi forage cap — flared crown, leather visor
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.155, 12, 12), skinMat);
     head.position.y = 1.72;
     head.castShadow = true;
+    const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.185, 0.155, 0.13, 12), hatMat);
+    crown.position.set(0, 1.84, -0.02);
+    crown.rotation.x = -0.12;
+    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.02, 0.13), leatherMat);
+    visor.position.set(0, 1.775, 0.15);
+    visor.rotation.x = 0.1;
 
-    // Hat: Forage Cap or Iron Brigade Hardee Black Hat
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.12, 12), hatMat);
-    cap.position.set(0, 1.82, -0.02);
-    cap.rotation.x = -0.15;
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.02, 0.14), leatherMat);
-    visor.position.set(0, 1.76, 0.14);
-
-    // Legs
-    const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.75, 0.2), pantsMat);
-    leftLeg.position.set(-0.14, 0.5, 0);
+    // Legs and brogans (legs are walk-animated by name)
+    const legGeo = new THREE.BoxGeometry(0.17, 0.72, 0.19);
+    const leftLeg = new THREE.Mesh(legGeo, pantsMat);
+    leftLeg.position.set(-0.13, 0.48, 0);
     leftLeg.name = 'leftLeg';
-
-    const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.75, 0.2), pantsMat);
-    rightLeg.position.set(0.14, 0.5, 0);
+    leftLeg.castShadow = true;
+    const rightLeg = new THREE.Mesh(legGeo, pantsMat);
+    rightLeg.position.set(0.13, 0.48, 0);
     rightLeg.name = 'rightLeg';
+    rightLeg.castShadow = true;
+    const bootGeo = new THREE.BoxGeometry(0.18, 0.16, 0.27);
+    const leftBoot = new THREE.Mesh(bootGeo, leatherMat);
+    leftBoot.position.set(-0.13, 0.08, 0.04);
+    const rightBoot = new THREE.Mesh(bootGeo, leatherMat);
+    rightBoot.position.set(0.13, 0.08, 0.04);
 
-    const leftBoot = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.18, 0.26), leatherMat);
-    leftBoot.position.set(-0.14, 0.09, 0.03);
-    const rightBoot = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.18, 0.26), leatherMat);
-    rightBoot.position.set(0.14, 0.09, 0.03);
+    // Arms angled forward, hands closed on the piece
+    const armGeo = new THREE.BoxGeometry(0.13, 0.52, 0.13);
+    const leftArm = new THREE.Mesh(armGeo, coatMat);
+    leftArm.position.set(-0.31, 1.24, 0.12);
+    leftArm.rotation.x = 0.55;
+    const rightArm = new THREE.Mesh(armGeo, coatMat);
+    rightArm.position.set(0.31, 1.24, 0.12);
+    rightArm.rotation.x = 0.55;
+    const handGeo = new THREE.SphereGeometry(0.07, 8, 8);
+    const leftHand = new THREE.Mesh(handGeo, skinMat);
+    leftHand.position.set(-0.31, 1.02, 0.26);
+    const rightHand = new THREE.Mesh(handGeo, skinMat);
+    rightHand.position.set(0.31, 1.02, 0.26);
 
-    // Arms
-    const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.55, 0.14), coatMat);
-    leftArm.position.set(-0.32, 1.25, 0.1);
-    leftArm.rotation.x = 0.5;
-
-    const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.55, 0.14), coatMat);
-    rightArm.position.set(0.32, 1.25, 0.1);
-    rightArm.rotation.x = 0.5;
-
-    // Musket prop in hands
-    const rifleProp = new THREE.Mesh(
-      new THREE.BoxGeometry(0.06, 0.06, 1.4),
+    // Musket prop — walnut stock, steel barrel, brass bands
+    const musketProp = new THREE.Group();
+    const pStock = new THREE.Mesh(
+      new THREE.BoxGeometry(0.055, 0.09, 0.85),
       new THREE.MeshStandardMaterial({ color: 0x3B281B, roughness: 0.8 })
     );
-    rifleProp.position.set(0.2, 1.15, 0.4);
-    rifleProp.rotation.x = 0.3;
+    pStock.position.z = 0.28;
+    const pBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.02, 1.15, 8), steelMat);
+    pBarrel.rotation.x = Math.PI / 2;
+    pBarrel.position.z = -0.35;
+    const pBandGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.035, 8);
+    const pBand1 = new THREE.Mesh(pBandGeo, brassMat);
+    pBand1.rotation.x = Math.PI / 2;
+    pBand1.position.z = -0.15;
+    const pBand2 = new THREE.Mesh(pBandGeo, brassMat);
+    pBand2.rotation.x = Math.PI / 2;
+    pBand2.position.z = -0.55;
+    musketProp.add(pStock, pBarrel, pBand1, pBand2);
+    musketProp.position.set(0.18, 1.12, 0.42);
+    musketProp.rotation.x = 0.35;
 
-    soldier.add(torso, belt, buckle, roll, head, cap, visor, leftLeg, rightLeg, leftBoot, rightBoot, leftArm, rightArm, rifleProp);
+    soldier.add(torso, skirt, belt, buckle, cartBox, cartPlate, capPouch, canteen, roll,
+      head, crown, visor, leftLeg, rightLeg, leftBoot, rightBoot,
+      leftArm, rightArm, leftHand, rightHand, musketProp);
+
+    // Sergeant's chevrons — sky-blue infantry trim on both sleeves
+    if (charType === 'SERGEANT') {
+      const chevMat = new THREE.MeshStandardMaterial({ color: 0x7ba4db, roughness: 0.6 });
+      for (const sx of [-0.31, 0.31]) {
+        for (let r = 0; r < 3; r++) {
+          const chev = new THREE.Mesh(new THREE.BoxGeometry(0.145, 0.035, 0.02), chevMat);
+          chev.position.set(sx, 1.32 - r * 0.055, 0.145);
+          chev.rotation.x = 0.55;
+          soldier.add(chev);
+        }
+      }
+    }
 
     if (charType === 'OFFICER_BOSS') {
+      // Crimson sash, gilt shoulder straps, sword
       const sash = new THREE.Mesh(
-        new THREE.BoxGeometry(0.53, 0.1, 0.33),
+        new THREE.CylinderGeometry(0.27, 0.27, 0.11, 10),
         new THREE.MeshStandardMaterial({ color: 0xAA2222, roughness: 0.4 })
       );
       sash.position.y = 0.95;
       soldier.add(sash);
+      for (const sx of [-0.26, 0.26]) {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.02, 0.22), brassMat);
+        strap.position.set(sx, 1.60, 0);
+        soldier.add(strap);
+      }
+      const sword = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.85, 0.06), steelMat);
+      sword.position.set(-0.36, 0.75, 0.05);
+      sword.rotation.z = 0.15;
+      soldier.add(sword);
       soldier.scale.set(1.15, 1.15, 1.15);
     }
 
@@ -1998,6 +2216,15 @@ export class GettysburgEngine {
     const forward = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.mountedCannon.rotY);
     const muzzlePos = this.mountedCannon.position.clone().add(forward.clone().multiplyScalar(2.0)).add(new THREE.Vector3(0, 1.2, 0));
 
+    // Share the shot with the room — everyone sees and hears the piece fire
+    this.callbacks.onLocalCannonFire?.({
+      cannonId: this.mountedCannon.id,
+      muzzlePos: [muzzlePos.x, muzzlePos.y, muzzlePos.z],
+      direction: [forward.x, forward.y, forward.z],
+      rotY: this.mountedCannon.rotY,
+      pitch: this.mountedCannon.pitch,
+    });
+
     // Heavy canister explosion smoke
     this.spawnArtilleryExplosion(muzzlePos);
     for (let i = 0; i < 10; i++) {
@@ -2047,6 +2274,36 @@ export class GettysburgEngine {
         time: Date.now(),
       });
     }
+  }
+
+  /** Another player fired a field piece — render the shared spectacle locally. */
+  public handleRemoteCannonFire(data: {
+    shooterId: string;
+    cannonId: string;
+    muzzlePos: number[];
+    direction: number[];
+    rotY: number;
+    pitch: number;
+  }) {
+    const muzzle = new THREE.Vector3(data.muzzlePos[0], data.muzzlePos[1], data.muzzlePos[2]);
+    const dir = new THREE.Vector3(data.direction[0], data.direction[1], data.direction[2]);
+
+    // Swing the piece to the firing lay so everyone sees where it points
+    const cannon = this.artilleryPieces.find((c) => c.id === data.cannonId);
+    if (cannon && cannon !== this.mountedCannon) {
+      cannon.rotY = data.rotY;
+      cannon.pitch = data.pitch;
+      cannon.group.rotation.y = data.rotY;
+      if (cannon.barrel) cannon.barrel.rotation.x = -data.pitch;
+    }
+
+    // Muzzle smoke + blast, scaled by distance
+    this.spawnArtilleryExplosion(muzzle);
+    for (let i = 0; i < 6; i++) this.spawnSmokeParticle(muzzle, dir);
+    const dist = this.playerPos.distanceTo(muzzle);
+    const vol = Math.max(0.12, 1 - dist / 140);
+    audio.playCannonBlast(vol);
+    if (dist < 45) this.addCameraShake(0.55 * (1 - dist / 45));
   }
 
   // Mobile / Virtual Controller API
@@ -2668,6 +2925,13 @@ export class GettysburgEngine {
     const totalTime = (isAuthentic ? (wData.authenticReloadTime || 12.0) : wData.reloadTime) * this.veteranReloadScale();
     const interval = 50;
     let elapsed = 0;
+    const firedStages = new Set<string>();
+    const stageAt = (mark: number, stage: 'TEAR' | 'BALL' | 'RAMROD' | 'CAP' | 'PRIMER') => {
+      if (this.reloadProgress >= mark && !firedStages.has(stage)) {
+        firedStages.add(stage);
+        audio.playReloadStage(stage);
+      }
+    };
 
     const reloadTimer = setInterval(() => {
       if (this.isDisposed) {
@@ -2677,12 +2941,12 @@ export class GettysburgEngine {
       elapsed += interval / 1000;
       this.reloadProgress = Math.min(1, elapsed / totalTime);
 
-      if (this.reloadProgress > 0.35 && this.reloadProgress < 0.4) {
-        audio.playReloadStage('RAMROD');
-      }
-      if (this.reloadProgress > 0.75 && this.reloadProgress < 0.8) {
-        audio.playReloadStage('PRIMER');
-      }
+      // Drill foley, fired once as each stage of the manual of arms is reached
+      stageAt(0.24, 'TEAR');    // cartridge bitten open at the teeth
+      stageAt(0.38, 'BALL');    // Minié ball thumbed into the muzzle
+      stageAt(0.45, 'RAMROD');  // rammer drawn from the pipes
+      stageAt(0.78, 'CAP');     // percussion cap pressed on the nipple
+      stageAt(0.88, 'PRIMER');  // hammer drawn to full cock
 
       this.callbacks.onAmmoChange(this.currentAmmo, this.reserveAmmo, this.isReloading, this.reloadProgress);
 
@@ -2956,7 +3220,12 @@ export class GettysburgEngine {
     const bobX = Math.cos(this.bobTimer * 0.5) * (this.isAimingADS ? 0.002 : 0.015) * bobMultiplier;
     const bobY = Math.sin(this.bobTimer) * (this.isAimingADS ? 0.002 : 0.012) * bobMultiplier;
 
-    // ---- Musket reload drill — staged 3D animation (LOAD → CHARGE → RAM → PRIME → SHOULDER)
+    // ---- Loading drill — Casey's "load in nine times," compressed ----
+    // LOAD: piece drops muzzle-up, held perpendicular at the left of the face,
+    //   hammer to half-cock. HANDLE: cartridge from the box. TEAR: bitten open
+    //   at the teeth. CHARGE: powder poured, ball thumbed into the muzzle.
+    //   DRAW: rammer from the pipes. RAM: two firm strokes. RETURN: rammer home.
+    //   PRIME: cap pressed on the nipple (still half-cock). SHOULDER: full cock.
     if (this.isReloading) {
       const p = this.reloadProgress;
       const sstep = (a: number, b: number, x: number) => {
@@ -2965,11 +3234,11 @@ export class GettysburgEngine {
       };
       const K = [
         { p: 0.00, pos: [0.24, -0.22, -0.45], rot: [0, 0, 0] },
-        { p: 0.14, pos: [-0.10, -0.30, -0.38], rot: [-0.55, 0.35, 0.55] },  // LOAD — cant across body
-        { p: 0.38, pos: [-0.12, -0.28, -0.40], rot: [-0.45, 0.30, 0.50] },  // CHARGE — cartridge in
-        { p: 0.62, pos: [-0.12, -0.28, -0.40], rot: [-0.45, 0.30, 0.50] },  // RAM — ramrod strokes
-        { p: 0.80, pos: [-0.04, -0.24, -0.42], rot: [-0.18, 0.10, 0.20] },  // PRIME — cap on, hammer cocks
-        { p: 1.00, pos: [0.24, -0.22, -0.45], rot: [0, 0, 0] },             // SHOULDER
+        { p: 0.14, pos: [-0.14, -0.34, -0.38], rot: [1.05, 0.12, 0.18] },  // LOAD — muzzle up
+        { p: 0.42, pos: [-0.14, -0.34, -0.38], rot: [1.05, 0.12, 0.18] },  // HANDLE→CHARGE — pour
+        { p: 0.72, pos: [-0.12, -0.32, -0.38], rot: [1.00, 0.10, 0.15] },  // DRAW→RAM→RETURN
+        { p: 0.84, pos: [-0.06, -0.28, -0.40], rot: [0.55, 0.05, 0.08] },  // PRIME — cap on nipple
+        { p: 1.00, pos: [0.24, -0.22, -0.45], rot: [0, 0, 0] },             // SHOULDER — full cock
       ];
       let ka = K[0], kb = K[K.length - 1];
       for (let i = 0; i < K.length - 1; i++) {
@@ -2987,21 +3256,61 @@ export class GettysburgEngine {
         L(ka.rot[1], kb.rot[1]),
         L(ka.rot[2], kb.rot[2])
       );
-      // Ramrod drill — draw at 0.30, three ramming strokes, returned by 0.68
+      // Paper cartridge: box → teeth (tear) → muzzle (pour) → discarded
+      if (this.cartridgeMesh) {
+        const cm = this.cartridgeMesh;
+        if (p < 0.14 || p > 0.46) {
+          cm.visible = false;
+        } else {
+          cm.visible = true;
+          if (p < 0.24) {
+            // HANDLE — right hand brings the cartridge up from the box
+            const ht = sstep(0.14, 0.24, p);
+            cm.position.set(0.30 - 0.21 * ht, -0.40 + 0.30 * ht, -0.35 + 0.03 * ht);
+            cm.rotation.set(0.3, 0, 0.2);
+          } else if (p < 0.30) {
+            // TEAR — bitten open at the teeth, small rip shake
+            const j = Math.sin(p * 400) * 0.008;
+            cm.position.set(0.09 + j, -0.10 + j * 0.5, -0.32);
+            cm.rotation.set(0.3 + j * 2, 0, 0.2);
+          } else if (p < 0.40) {
+            // CHARGE — tipped over the muzzle to pour the powder
+            const ct = sstep(0.30, 0.36, p);
+            cm.position.set(0.09 - 0.23 * ct, -0.10 + 0.88 * ct, -0.32 - 0.68 * ct);
+            cm.rotation.set(0.3 + ct * 2.4, 0, 0.2);
+          } else {
+            // torn paper tossed aside
+            const dt2 = sstep(0.40, 0.46, p);
+            cm.position.set(-0.14 + 0.10 * dt2, 0.78 - 0.55 * dt2, -1.00 + 0.25 * dt2);
+            cm.rotation.set(2.7 + dt2, 0, 0.2 + dt2);
+          }
+        }
+      }
+      // Powder pour bloom at the muzzle while charging
+      if (this.pourPuffMesh) {
+        const pm = this.pourPuffMesh;
+        const pa = sstep(0.33, 0.36, p) * (1 - sstep(0.40, 0.45, p));
+        pm.visible = pa > 0.01;
+        (pm.material as THREE.MeshBasicMaterial).opacity = 0.45 * pa;
+        pm.position.set(-0.14, 0.80, -1.02);
+        const ps = 0.6 + 0.9 * sstep(0.33, 0.45, p);
+        pm.scale.set(ps, ps, ps);
+      }
+      // Rammer drill — drawn at 0.42, two firm strokes, returned by 0.72
       if (this.ramrodMesh) {
-        const drawT = sstep(0.28, 0.36, p) * (1 - sstep(0.60, 0.68, p));
-        const stroke = (p > 0.38 && p < 0.58)
-          ? (Math.sin((p - 0.38) / 0.20 * Math.PI * 3) * 0.5 + 0.5)
+        const drawT = sstep(0.42, 0.50, p) * (1 - sstep(0.64, 0.72, p));
+        const stroke = (p > 0.50 && p < 0.64)
+          ? (Math.sin((p - 0.50) / 0.14 * Math.PI * 2) * 0.5 + 0.5)
           : 0;
         this.ramrodMesh.position.set(
           0,
           -0.035 + drawT * 0.10,
-          -0.7 - drawT * 1.05 + stroke * 0.35 * drawT
+          -0.7 - drawT * 1.05 + stroke * 0.38 * drawT
         );
       }
-      // Hammer cocks back during PRIME
+      // Hammer — half-cock at LOAD (safe while loading), full cock at SHOULDER
       if (this.hammerMesh) {
-        this.hammerMesh.rotation.x = -0.85 * sstep(0.68, 0.82, p);
+        this.hammerMesh.rotation.x = -0.45 * sstep(0.02, 0.10, p) - 0.40 * sstep(0.84, 0.96, p);
       }
     } else {
       this.gunPivot.position.set(
@@ -3013,6 +3322,8 @@ export class GettysburgEngine {
       // Drill reset
       if (this.ramrodMesh) this.ramrodMesh.position.set(0, -0.035, -0.7);
       if (this.hammerMesh) this.hammerMesh.rotation.x = 0;
+      if (this.cartridgeMesh) this.cartridgeMesh.visible = false;
+      if (this.pourPuffMesh) this.pourPuffMesh.visible = false;
     }
 
     // Bayonet affixing entry slide animation
@@ -3412,6 +3723,8 @@ export class GettysburgEngine {
       }
 
       p.mesh.position.addScaledVector(p.vel, dt);
+      // The southerly breeze pushes lingering smoke northward
+      p.mesh.position.addScaledVector(this.windVec, dt * 0.45);
       p.vel.y -= 3.5 * (p.gravityScale ?? 1) * dt;
       p.mesh.scale.addScalar(p.scaleRate * dt);
       if (p.mesh.material instanceof THREE.Material && 'opacity' in p.mesh.material) {
@@ -3421,12 +3734,14 @@ export class GettysburgEngine {
   }
 
   private updateFlags(dt: number) {
+    // Flags stream on the recorded breeze — 12 mph southerly, gusting in the storm
+    const windFactor = 0.65 + (this.windMph / 12) * 0.45;
     this.flags.forEach((f) => {
-      f.waveOffset += dt * 4;
+      f.waveOffset += dt * 4 * windFactor;
       const pos = (f.mesh.geometry as THREE.PlaneGeometry).attributes.position;
       for (let i = 0; i < pos.count; i++) {
         const u = pos.getX(i);
-        pos.setZ(i, Math.sin(u * 2 + f.waveOffset) * 0.18);
+        pos.setZ(i, Math.sin(u * 2 + f.waveOffset) * 0.18 * windFactor);
       }
       pos.needsUpdate = true;
     });

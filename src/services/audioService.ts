@@ -143,7 +143,7 @@ class AudioService {
     osc.stop(t + 0.2);
   }
 
-  public playCannonBlast() {
+  public playCannonBlast(volume: number = 1) {
     this.init();
     if (!this.ctx || !this.sfxGain) return;
     const t = this.ctx.currentTime;
@@ -155,7 +155,7 @@ class AudioService {
     osc.frequency.setValueAtTime(110, t);
     osc.frequency.exponentialRampToValueAtTime(20, t + 1.2);
 
-    oscGain.gain.setValueAtTime(1.8, t);
+    oscGain.gain.setValueAtTime(1.8 * volume, t);
     oscGain.gain.exponentialRampToValueAtTime(0.001, t + 1.3);
 
     // Rumble noise
@@ -174,7 +174,7 @@ class AudioService {
     filter.frequency.exponentialRampToValueAtTime(80, t + 1.2);
 
     const noiseGain = this.ctx.createGain();
-    noiseGain.gain.setValueAtTime(1.4, t);
+    noiseGain.gain.setValueAtTime(1.4 * volume, t);
     noiseGain.gain.exponentialRampToValueAtTime(0.01, t + 1.4);
 
     osc.connect(oscGain);
@@ -393,7 +393,7 @@ class AudioService {
     }
   }
 
-  public playReloadStage(stage: 'POWDER' | 'BALL' | 'RAMROD' | 'PRIMER' | 'SUCCESS') {
+  public playReloadStage(stage: 'POWDER' | 'TEAR' | 'BALL' | 'RAMROD' | 'CAP' | 'PRIMER' | 'SUCCESS') {
     this.init();
     if (!this.ctx || !this.sfxGain) return;
     const t = this.ctx.currentTime;
@@ -416,6 +416,31 @@ class AudioService {
       filter.connect(this.sfxGain);
       noise.start(t);
       return;
+    } else if (stage === 'TEAR') {
+      // Paper cartridge torn open at the teeth — short papery rip
+      const bufferSize = this.ctx.sampleRate * 0.09;
+      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        const env = 1 - i / bufferSize;
+        data[i] = (Math.random() * 2 - 1) * 0.5 * env * env;
+      }
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = buffer;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'highpass';
+      filter.frequency.value = 2800;
+      noise.connect(filter);
+      filter.connect(this.sfxGain);
+      noise.start(t);
+      return;
+    } else if (stage === 'BALL') {
+      // Minié ball thumbed into the muzzle — soft low thud
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(190, t);
+      osc.frequency.exponentialRampToValueAtTime(85, t + 0.1);
+      gain.gain.setValueAtTime(0.45, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
     } else if (stage === 'RAMROD') {
       // Metallic slide & tap
       osc.type = 'sawtooth';
@@ -423,13 +448,19 @@ class AudioService {
       osc.frequency.exponentialRampToValueAtTime(220, t + 0.15);
       gain.gain.setValueAtTime(0.3, t);
       gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
-    } else if (stage === 'PRIMER') {
-      // Crisp metallic click
+    } else if (stage === 'CAP') {
+      // Percussion cap pressed onto the nipple — tiny metallic tick
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(1400, t);
-      osc.frequency.setValueAtTime(900, t + 0.03);
-      gain.gain.setValueAtTime(0.6, t);
-      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.08);
+      osc.frequency.setValueAtTime(2500, t);
+      gain.gain.setValueAtTime(0.35, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+    } else if (stage === 'PRIMER') {
+      // Hammer drawn to full cock — heavy lock click
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(700, t);
+      osc.frequency.setValueAtTime(420, t + 0.04);
+      gain.gain.setValueAtTime(0.5, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
     } else if (stage === 'SUCCESS') {
       // Arcade golden ready chime
       osc.type = 'sine';

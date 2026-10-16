@@ -9,6 +9,7 @@ export interface MultiplayerCallbacks {
   onDamageEvent: (data: any) => void;
   onPlayerRespawned: (data: any) => void;
   onArtilleryBarrage: (data: any) => void;
+  onCannonFired: (data: any) => void;
   onChatMessage: (data: any) => void;
   onConnectionChange: (connected: boolean) => void;
 }
@@ -77,6 +78,9 @@ export class MultiplayerService {
               break;
             case 'artillery_barrage':
               this.callbacks.onArtilleryBarrage(data);
+              break;
+            case 'cannon_fired':
+              this.callbacks.onCannonFired(data);
               break;
             case 'chat_broadcast':
               this.callbacks.onChatMessage(data);
@@ -149,6 +153,17 @@ export class MultiplayerService {
       type: 'artillery_call',
       targetPos,
     }));
+  }
+
+  public sendCannonFire(payload: {
+    cannonId: string;
+    muzzlePos: number[];
+    direction: number[];
+    rotY: number;
+    pitch: number;
+  }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'cannon_fire', ...payload }));
   }
 
   public sendChat(text: string) {

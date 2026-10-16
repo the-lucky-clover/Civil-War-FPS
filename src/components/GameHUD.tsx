@@ -28,7 +28,9 @@ import {
   Heart,
   CloudRain,
   Sun,
+  Cloud,
   CloudFog,
+  CloudLightning,
   Clock,
   Skull,
   Target,
@@ -506,6 +508,30 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               >
                 <CloudFog className="w-2.5 h-2.5" />
                 <span className="hidden sm:inline">Fog</span>
+              </button>
+              <button
+                onClick={() => onWeatherChange?.('OVERCAST')}
+                className={`flex items-center gap-0.5 px-1 py-0.5 rounded transition-colors text-[9px] cursor-pointer ${
+                  atmosphere?.weather === 'OVERCAST'
+                    ? 'bg-slate-500/30 text-slate-300 font-bold border border-slate-500/60'
+                    : 'text-stone-400 hover:text-stone-200 border border-transparent'
+                }`}
+                title="Overcast — July 1 skies"
+              >
+                <Cloud className="w-2.5 h-2.5" />
+                <span className="hidden sm:inline">Overcast</span>
+              </button>
+              <button
+                onClick={() => onWeatherChange?.('STORM')}
+                className={`flex items-center gap-0.5 px-1 py-0.5 rounded transition-colors text-[9px] cursor-pointer ${
+                  atmosphere?.weather === 'STORM'
+                    ? 'bg-indigo-500/30 text-indigo-300 font-bold border border-indigo-500/60'
+                    : 'text-stone-400 hover:text-stone-200 border border-transparent'
+                }`}
+                title="Storm — July 3 afternoon"
+              >
+                <CloudLightning className="w-2.5 h-2.5" />
+                <span className="hidden sm:inline">Storm</span>
               </button>
             </div>
           </div>

@@ -213,6 +213,10 @@ export default function App() {
       onArtilleryBarrage: (data) => {
         audio.playCannonBlast();
       },
+      onCannonFired: (data) => {
+        // A fellow soldier is working a field piece — show the shot
+        engineRef.current?.handleRemoteCannonFire(data);
+      },
       onChatMessage: (data) => {},
       onConnectionChange: (conn) => {
         console.log('MP Connection:', conn);
@@ -333,6 +337,10 @@ export default function App() {
           },
           onCannonStateChange: (isMounted, reloadProgress) => {
             setCannonState({ isMounted, reloadProgress });
+          },
+          onLocalCannonFire: (data) => {
+            // Our gunner fired — broadcast the shot to the room
+            mpServiceRef.current?.sendCannonFire(data);
           },
           onTicketChange: (union, confed) => {
             setTicketState({ unionTickets: union, confedTickets: confed });

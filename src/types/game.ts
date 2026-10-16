@@ -2,7 +2,7 @@ export type Faction = 'NORTH' | 'SOUTH';
 export type CharacterClass = 'INFANTRY' | 'SHARPSHOOTER' | 'MEDIC' | 'OFFICER';
 export type GameMode = 'TITLE' | 'CAMPAIGN' | 'MULTIPLAYER' | 'ARMORY' | 'LEADERBOARD' | 'VICTORY' | 'DEFEAT';
 export type WeaponBehaviorMode = 'ARCADE' | 'AUTHENTIC';
-export type WeatherType = 'CLEAR' | 'LIGHT_RAIN' | 'HEAVY_FOG';
+export type WeatherType = 'CLEAR' | 'LIGHT_RAIN' | 'HEAVY_FOG' | 'OVERCAST' | 'STORM';
 
 export interface HistoricalSettings {
   weaponBehavior: WeaponBehaviorMode; // ARCADE: fast reload, AUTHENTIC: 12s 9-step paper cartridge drill + smoke

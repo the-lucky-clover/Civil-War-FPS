@@ -314,6 +314,24 @@ wss.on('connection', (ws: WebSocket) => {
           break;
         }
 
+        case 'cannon_fire': {
+          if (!currentRoomId || !currentPlayerId) return;
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+
+          // A player is working a field piece — share the spectacle with the room.
+          broadcastToRoom(room, {
+            type: 'cannon_fired',
+            shooterId: currentPlayerId,
+            cannonId: data.cannonId,
+            muzzlePos: data.muzzlePos,
+            direction: data.direction,
+            rotY: data.rotY,
+            pitch: data.pitch,
+          }, currentPlayerId);
+          break;
+        }
+
         case 'chat_message': {
           if (!currentRoomId || !currentPlayerId) return;
           const room = rooms.get(currentRoomId);
