@@ -11,11 +11,15 @@
  * (On a LAN it just works; over the internet you'll need port forwarding
  * or a VPN like Tailscale.)
  */
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, Menu, dialog } = require('electron');
 const { fork } = require('child_process');
 const path = require('path');
 const net = require('net');
 const http = require('http');
+
+// Use the real GPU: don't let Chromium's software fallback list kick in.
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
 
 let serverChild = null;
 let mainWindow = null;
@@ -81,12 +85,63 @@ function startGameServer(port) {
   });
 }
 
+const RESOLUTION_PRESETS = [
+  { label: '1280 × 720', width: 1280, height: 720 },
+  { label: '1600 × 900', width: 1600, height: 900 },
+  { label: '1920 × 1080', width: 1920, height: 1080 },
+  { label: '2560 × 1440', width: 2560, height: 1440 },
+];
+
+function applyResolution(width, height) {
+  if (!mainWindow) return;
+  if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  mainWindow.setSize(width, height);
+  mainWindow.center();
+}
+
+function toggleFullscreen() {
+  if (!mainWindow) return;
+  mainWindow.setFullScreen(!mainWindow.isFullScreen());
+}
+
+function buildMenu() {
+  const template = [
+    {
+      label: 'Game',
+      submenu: [{ role: 'quit' }],
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Fullscreen',
+          accelerator: 'F11',
+          click: toggleFullscreen,
+        },
+        { type: 'separator' },
+        ...RESOLUTION_PRESETS.map((p) => ({
+          label: `Window: ${p.label}`,
+          click: () => applyResolution(p.width, p.height),
+        })),
+        { type: 'separator' },
+        {
+          label: 'Maximize Window',
+          click: () => mainWindow && mainWindow.maximize(),
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: 1600,
+    height: 900,
     minWidth: 960,
     minHeight: 600,
+    show: false,
     title: 'Gettysburg — Civil War FPS',
     backgroundColor: '#0a0806',
     webPreferences: {
@@ -94,7 +149,11 @@ function createWindow() {
       contextIsolation: true,
     },
   });
+  buildMenu();
   mainWindow.loadURL(`http://127.0.0.1:${gamePort}/`);
+  // Launch maximized so the battlefield fills the desktop on any monitor.
+  mainWindow.maximize();
+  mainWindow.show();
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

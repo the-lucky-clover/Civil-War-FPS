@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "playtest": "bash playtest/run-playtest.sh",
     "electron": "electron electron/main.js",
-    "dist-mac": "electron-builder --mac dmg --arm64 --x64"
+    "dist-mac": "electron-builder --mac dmg --arm64 --x64",
+    "dist-win": "electron-builder --win portable zip --x64"
   },
   "build": {
     "appId": "com.luckyclover.gettysburg-fps",
@@ -33,6 +34,22 @@
           "target": "dmg",
           "arch": [
             "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
             "x64"
           ]
         }
